@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Bug Bounty Knowledge Graph</title>
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+<div id="app">
+  <aside id="sidebar">
+    <header class="brand">
+      <span class="logo">◆</span>
+      <div>
+        <div class="brand-title">Knowledge Graph</div>
+        <div class="brand-sub" id="kbcount">loading…</div>
+      </div>
+    </header>
+
+    <div class="toolbar">
+      <input id="search" type="search" placeholder="Search nodes, tags…" autocomplete="off">
+      <div class="sort-row">
+        <label for="sort">Sort</label>
+        <select id="sort" title="Order the list">
+          <option value="type">By type</option>
+          <option value="az">A → Z</option>
+          <option value="newest">Newest created</option>
+          <option value="updated">Recently updated</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="btn-row">
+      <button id="btn-new" class="btn primary">+ New node</button>
+      <button id="btn-reindex" class="btn" title="Rebuild INDEX.md from nodes">↻ Reindex</button>
+    </div>
+
+    <nav id="nodelist"></nav>
+
+    <div class="share">
+      <div class="share-title">Share / backup</div>
+      <div class="btn-row">
+        <button id="btn-export-zip" class="btn">⬇ .zip</button>
+        <button id="btn-export-json" class="btn">⬇ .json</button>
+        <button id="btn-import" class="btn">⬆ Import</button>
+      </div>
+      <input id="import-file" type="file" accept="application/json,.json" hidden>
+    </div>
+  </aside>
+
+  <main id="main">
+    <div class="tabs">
+      <button class="tab active" data-view="graph">Graph</button>
+      <button class="tab" data-view="node">Node</button>
+      <button class="tab" data-view="journal">Journal</button>
+      <div class="spacer"></div>
+      <div id="status" class="status"></div>
+    </div>
+
+    <!-- GRAPH -->
+    <section id="view-graph" class="view active">
+      <div class="graph-bar">
+        <div class="graph-legend" id="legend"></div>
+        <div class="graph-controls">
+          <button id="flt-all" class="btn tiny" title="Show all types">All</button>
+          <button id="flt-none" class="btn tiny" title="Hide all types">None</button>
+          <label class="chk" title="Also hide nodes you've disabled"><input type="checkbox" id="flt-hide-disabled"> Hide disabled</label>
+        </div>
+      </div>
+      <svg id="graph" xmlns="http://www.w3.org/2000/svg"></svg>
+      <div class="graph-hint">Drag nodes · click to open · click a legend chip to filter by type</div>
+    </section>
+
+    <!-- NODE -->
+    <section id="view-node" class="view">
+      <div id="node-empty" class="empty">Select a node from the list or the graph.</div>
+      <article id="node-detail" hidden>
+        <div class="node-head">
+          <div>
+            <h1 id="nd-title"></h1>
+            <div id="nd-meta" class="chips"></div>
+          </div>
+          <div class="node-actions">
+            <button id="btn-toggle" class="btn">⏻ Disable</button>
+            <button id="btn-edit" class="btn">✎ Edit</button>
+            <button id="btn-delete" class="btn danger">🗑 Delete</button>
+          </div>
+        </div>
+        <div id="nd-rendered" class="markdown"></div>
+        <div id="nd-editor" hidden>
+          <textarea id="nd-raw" spellcheck="false"></textarea>
+          <div class="btn-row">
+            <button id="btn-save" class="btn primary">💾 Save</button>
+            <button id="btn-cancel" class="btn">Cancel</button>
+            <span class="edit-hint">Raw markdown + frontmatter. <code>id</code> must equal the slug; <code>updated</code> is set automatically.</span>
+          </div>
+        </div>
+      </article>
+    </section>
+
+    <!-- JOURNAL -->
+    <section id="view-journal" class="view">
+      <div id="journal" class="markdown"></div>
+    </section>
+  </main>
+</div>
+
+<!-- New-node dialog -->
+<dialog id="new-dialog">
+  <form method="dialog" id="new-form">
+    <h2>New node</h2>
+    <label>Slug <span class="hint">lowercase-kebab-case</span>
+      <input id="nn-slug" required pattern="[a-z0-9][a-z0-9-]*" placeholder="e.g. jwt-alg-none-bypass"></label>
+    <label>Title <input id="nn-title" required placeholder="JWT alg:none bypass"></label>
+    <label>Type
+      <select id="nn-type">
+        <option value="technique">technique</option>
+        <option value="tool">tool</option>
+        <option value="reference">reference</option>
+        <option value="lesson">lesson</option>
+        <option value="workflow">workflow</option>
+        <option value="reporting">reporting</option>
+        <option value="vuln-class">vuln-class</option>
+      </select></label>
+    <label>Tags <span class="hint">comma-separated</span>
+      <input id="nn-tags" placeholder="jwt, auth, bypass"></label>
+    <label>Summary <input id="nn-summary" placeholder="One line on what this is."></label>
+    <div class="btn-row">
+      <button value="create" class="btn primary">Create</button>
+      <button value="cancel" class="btn" formnovalidate>Cancel</button>
+    </div>
+  </form>
+</dialog>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

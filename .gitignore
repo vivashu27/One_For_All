@@ -1,0 +1,10 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Local Claude Code session helper (not part of the plugin)
+claude_sessions
+
+# OS / editor cruft
+.DS_Store
+*.swp
