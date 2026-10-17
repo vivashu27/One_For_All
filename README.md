@@ -5,11 +5,6 @@ bounty and security assessments. Knowledge learned in one session — techniques
 tools, references, lessons, and reporting insights — is captured, deduped, linked,
 and reused by every future session.
 
-> Formerly `Bug_Bounty_Knowledge_Memory_builder`. The plugin **identity** is now
-> `One_For_All`; the project folder (`Bug_Bounty_Knowledge_Memory_builder/`) and the
-> knowledge-base path (`~/.claude/bug-bounty-knowledge/`) are intentionally unchanged so
-> your 33 existing nodes and the registered marketplace keep working.
-
 Think of it as long-term memory that gets *smarter the more you hunt*, instead of
 starting from zero each engagement.
 
