@@ -128,6 +128,7 @@ function buildGraphDOM() {
   svg.innerHTML = "";
   sim.looping = false; sim.alpha = 0;  // stop any in-flight loop before rebuilding
   const W = svg.clientWidth || 800, H = svg.clientHeight || 600;
+  sim.W = W;
   const visible = state.graph.nodes.filter(
     (n) => typeVisible(n.type) && (!state.hideDisabled || n.enabled !== false)
   );
@@ -174,7 +175,7 @@ function buildGraphDOM() {
     gEdges.appendChild(ln);
     return ln;
   });
-  sim.els = {};
+  sim.els = {}; sim.labels = {};
   sim.nodes.forEach((n) => {
     const g = document.createElementNS(SVGNS, "g");
     g.setAttribute("class", "gnode" + (n.hub ? " hub" : "") + (n.enabled === false ? " off" : ""));
@@ -192,6 +193,7 @@ function buildGraphDOM() {
     g.appendChild(tt);
     gNodes.appendChild(g);
     sim.els[n.id] = g;
+    sim.labels[n.id] = label;
     if (!n.hub) {   // hubs are layout anchors: not draggable, not clickable
       attachDrag(g, n);
       g.addEventListener("mouseenter", () => highlightNeighbors(n.id, true));
@@ -249,7 +251,22 @@ function frame() {
     ln.setAttribute("x1", a.x); ln.setAttribute("y1", a.y);
     ln.setAttribute("x2", b.x); ln.setAttribute("y2", b.y);
   });
-  sim.nodes.forEach((n) => sim.els[n.id].setAttribute("transform", `translate(${n.x},${n.y})`));
+  sim.nodes.forEach((n) => {
+    sim.els[n.id].setAttribute("transform", `translate(${n.x},${n.y})`);
+    // nodes are clamped to the canvas but their labels are not: flip the text inward
+    // near the right edge so long titles stay readable instead of being cut off.
+    if (n.lw == null) {   // measured once per rebuild: titles vary a lot in length
+      const el = sim.labels[n.id];
+      n.lw = (el.getComputedTextLength ? el.getComputedTextLength() : 0) || el.textContent.length * 5.8;
+    }
+    const flip = n.x + n.r + 8 + n.lw > (sim.W || 800);
+    if (flip !== n.flipped) {
+      const t = sim.labels[n.id];
+      t.setAttribute("x", flip ? -(n.r + 4) : n.r + 4);
+      t.setAttribute("text-anchor", flip ? "end" : "start");
+      n.flipped = flip;
+    }
+  });
 }
 function attachDrag(g, n) {
   let moved = false, startX, startY;
