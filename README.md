@@ -8,13 +8,12 @@ and reused by every future session.
 Think of it as long-term memory that gets *smarter the more you hunt*, instead of
 starting from zero each engagement.
 
-<a href="https://github.com/vivashu27/One_For_All/raw/main/docs/demo.mp4">
-  <img src="docs/demo-poster.jpg" alt="One_For_All demo video - the knowledge graph clustered under its category hubs" width="860">
-</a>
+![The One_For_All knowledge graph, with nodes clustered under their category hubs](docs/showcase.png)
 
-<sup>**[▶ Watch the 21s demo](https://github.com/vivashu27/One_For_All/raw/main/docs/demo.mp4)**
-&nbsp;·&nbsp; query the graph, load only the node the task needs, compound what you learned
-back in. Every node title shown is a generic example, not real graph content.</sup>
+<sup>The graph view in `/serve-knowledge`: every node sits under its category hub —
+techniques, tools, references, workflows, reporting, lessons, vuln classes. Click a
+legend chip to filter by type, drag a node to pull its cluster around, click one to open
+it. Node titles shown are generic examples, not real graph content.</sup>
 
 ## Commands
 
