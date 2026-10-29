@@ -8,3 +8,6 @@ claude_sessions
 # OS / editor cruft
 .DS_Store
 *.swp
+
+# /brag output (video, composition, node_modules)
+brag-output/
