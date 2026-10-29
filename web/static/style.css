@@ -144,6 +144,11 @@ dialog::backdrop { background: rgba(0,0,0,.55); }
 #new-form input:focus, #new-form select:focus { border-color: var(--accent); }
 
 /* --- v1.2 features: sort, enable/disable, graph type filter --- */
+.graph-row { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.graph-row label { font-size: 12px; color: var(--muted); }
+#graphsel { flex: 1; min-width: 0; padding: 6px 8px; border-radius: 8px; border: 1px solid var(--border); background: var(--panel-2); color: var(--text); outline: none; }
+#graphsel:focus { border-color: var(--accent); }
+#btn-del-graph:disabled { opacity: .35; cursor: not-allowed; color: var(--muted); border-color: var(--border); }
 .sort-row { display: flex; align-items: center; gap: 8px; margin-top: 8px; }
 .sort-row label { font-size: 12px; color: var(--muted); }
 #sort { flex: 1; padding: 6px 8px; border-radius: 8px; border: 1px solid var(--border); background: var(--panel-2); color: var(--text); outline: none; }
@@ -178,6 +183,13 @@ dialog::backdrop { background: rgba(0,0,0,.55); }
 /* graph disabled node */
 .gnode.off { opacity: .32; }
 .gnode.off circle { stroke-dasharray: 3 2; }
+
+/* category parent hubs + their spokes */
+.gnode.hub { cursor: default; }
+.gnode.hub circle { stroke: var(--text); stroke-width: 2.5; }
+.gnode.hub text { font-size: 13px; font-weight: 700; }
+.gnode text { font-size: 10.5px; }
+.edge.spoke { stroke: #2a3a4e; stroke-width: 1; }
 
 @media (max-width: 720px) {
   #sidebar { width: 200px; min-width: 200px; }

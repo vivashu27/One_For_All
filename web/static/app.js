@@ -14,7 +14,9 @@ const TYPE_LABEL = {
 const TYPE_ORDER = ["vuln-class", "technique", "tool", "reference", "workflow", "reporting", "lesson"];
 
 const state = {
-  graph: { nodes: [], edges: [] }, selected: null, query: "", editing: false,
+  graph: { nodes: [], edges: [] },   // the loaded graph DATA (nodes/edges)
+  graphName: null,                   // which graph is selected (null = the server's launch graph)
+  selected: null, query: "", editing: false,
   sort: "type",          // type | az | newest | updated
   typeFilter: null,      // Set of visible types in the graph (null = all)
   hideDisabled: false,   // also hide disabled nodes in the graph
@@ -26,7 +28,9 @@ async function api(method, path, body) {
   const headers = {};
   if (TOKEN) headers["X-KB-Token"] = TOKEN;
   if (body !== undefined) headers["Content-Type"] = "application/json";
-  const res = await fetch("/api" + path, {
+  let url = "/api" + path;
+  if (state.graphName) url += (url.includes("?") ? "&" : "?") + "graph=" + encodeURIComponent(state.graphName);
+  const res = await fetch(url, {
     method, headers, body: body !== undefined ? JSON.stringify(body) : undefined,
   });
   const ct = res.headers.get("content-type") || "";
@@ -128,43 +132,71 @@ function buildGraphDOM() {
     (n) => typeVisible(n.type) && (!state.hideDisabled || n.enabled !== false)
   );
   const visibleIds = new Set(visible.map((n) => n.id));
-  sim.nodes = visible.map((n) => ({
-    ...n,
-    x: W / 2 + (Math.random() - 0.5) * Math.min(W, 500),
-    y: H / 2 + (Math.random() - 0.5) * Math.min(H, 400),
-    vx: 0, vy: 0, fixed: false, r: 7 + Math.min(10, (n.reinforced || 0) * 2),
-  }));
+  // One anchored parent hub per category, spaced on an ellipse, so the graph reads as
+  // labelled clusters instead of a single blob. Hubs are synthetic (not KB nodes).
+  const counts = {};
+  visible.forEach((n) => (counts[n.type] = (counts[n.type] || 0) + 1));
+  const hubTypes = [...new Set([...TYPE_ORDER, ...Object.keys(counts)])].filter((t) => counts[t]);
+  const RX = W * 0.33, RY = H * 0.30;
+  const hubs = hubTypes.map((t, i) => {
+    const a = (i / hubTypes.length) * Math.PI * 2 - Math.PI / 2;
+    return {
+      id: "__hub__" + t, hub: true, type: t, title: TYPE_LABEL[t] || t,
+      x: W / 2 + Math.cos(a) * RX, y: H / 2 + Math.sin(a) * RY,
+      vx: 0, vy: 0, fixed: true, r: 13,   // fixed → the tick leaves it anchored
+    };
+  });
+  const hubById = {}; hubs.forEach((h) => (hubById[h.type] = h));
+
+  sim.nodes = visible.map((n) => {
+    const h = hubById[n.type];
+    return {
+      ...n,
+      x: (h ? h.x : W / 2) + (Math.random() - 0.5) * 120,
+      y: (h ? h.y : H / 2) + (Math.random() - 0.5) * 120,
+      vx: 0, vy: 0, fixed: false, r: 7 + Math.min(10, (n.reinforced || 0) * 2),
+    };
+  }).concat(hubs);
   sim.byId = {}; sim.nodes.forEach((n) => (sim.byId[n.id] = n));
   const gEdges = document.createElementNS(SVGNS, "g");
   const gNodes = document.createElementNS(SVGNS, "g");
   svg.appendChild(gEdges); svg.appendChild(gNodes);
-  const edges = state.graph.edges.filter((e) => visibleIds.has(e.source) && visibleIds.has(e.target));
-  sim.edgeEls = edges.map((e) => {
+  // weak links between related nodes; strong spoke pinning each node to its own hub
+  sim.edges = state.graph.edges
+    .filter((e) => visibleIds.has(e.source) && visibleIds.has(e.target))
+    .map((e) => ({ s: e.source, t: e.target, len: 110, k: 0.006, cls: "edge" }))
+    .concat(visible.filter((n) => hubById[n.type])
+      .map((n) => ({ s: n.id, t: hubById[n.type].id, len: 78, k: 0.055, cls: "edge spoke" })));
+  sim.edgeEls = sim.edges.map((e) => {
     const ln = document.createElementNS(SVGNS, "line");
-    ln.setAttribute("class", "edge");
-    ln.dataset.s = e.source; ln.dataset.t = e.target;
+    ln.setAttribute("class", e.cls);
+    ln.dataset.s = e.s; ln.dataset.t = e.t;
     gEdges.appendChild(ln);
     return ln;
   });
   sim.els = {};
   sim.nodes.forEach((n) => {
     const g = document.createElementNS(SVGNS, "g");
-    g.setAttribute("class", "gnode" + (n.enabled === false ? " off" : "")); g.dataset.id = n.id;
+    g.setAttribute("class", "gnode" + (n.hub ? " hub" : "") + (n.enabled === false ? " off" : ""));
+    g.dataset.id = n.id;
     const c = document.createElementNS(SVGNS, "circle");
     c.setAttribute("r", n.r);
     c.setAttribute("fill", TYPE_COLORS[n.type] || "#888");
     const label = document.createElementNS(SVGNS, "text");
     label.setAttribute("x", n.r + 4); label.setAttribute("y", 4);
-    label.textContent = n.title;
+    label.textContent = n.hub ? `${n.title} (${counts[n.type]})` : n.title;
     g.appendChild(c); g.appendChild(label);
     const tt = document.createElementNS(SVGNS, "title");
-    tt.textContent = `${n.title} [${n.type}] — ${n.confidence}, reinforced ${n.reinforced}` + (n.enabled === false ? " (disabled)" : "");
+    tt.textContent = n.hub ? `${n.title} — ${counts[n.type]} node(s)`
+      : `${n.title} [${n.type}] — ${n.confidence}, reinforced ${n.reinforced}` + (n.enabled === false ? " (disabled)" : "");
     g.appendChild(tt);
     gNodes.appendChild(g);
     sim.els[n.id] = g;
-    attachDrag(g, n);
-    g.addEventListener("mouseenter", () => highlightNeighbors(n.id, true));
-    g.addEventListener("mouseleave", () => highlightNeighbors(n.id, false));
+    if (!n.hub) {   // hubs are layout anchors: not draggable, not clickable
+      attachDrag(g, n);
+      g.addEventListener("mouseenter", () => highlightNeighbors(n.id, true));
+      g.addEventListener("mouseleave", () => highlightNeighbors(n.id, false));
+    }
   });
   startSim();
 }
@@ -188,16 +220,16 @@ function startSim(reheat) {
         a.vx += fx; a.vy += fy; b.vx -= fx; b.vy -= fy;
       }
     }
-    state.graph.edges.forEach((e) => {
-      const a = sim.byId[e.source], b = sim.byId[e.target];
+    (sim.edges || []).forEach((e) => {
+      const a = sim.byId[e.s], b = sim.byId[e.t];
       if (!a || !b) return;
       let dx = b.x - a.x, dy = b.y - a.y, d = Math.sqrt(dx * dx + dy * dy) || 0.01;
-      const k = (d - 130) * 0.015, fx = (dx / d) * k, fy = (dy / d) * k;
+      const k = (d - e.len) * e.k, fx = (dx / d) * k, fy = (dy / d) * k;
       a.vx += fx; a.vy += fy; b.vx -= fx; b.vy -= fy;
     });
     ns.forEach((n) => {
-      if (n.fixed) { n.vx = n.vy = 0; return; }  // pinned to cursor: no drift, no fling
-      n.vx += (W / 2 - n.x) * 0.003; n.vy += (H / 2 - n.y) * 0.003;
+      if (n.fixed) { n.vx = n.vy = 0; return; }  // anchored hub, or pinned to cursor
+      // no center gravity: hub spokes do the positioning, keeping clusters apart
       n.x += n.vx * sim.alpha * 0.4; n.y += n.vy * sim.alpha * 0.4;
       n.x = Math.max(n.r + 6, Math.min(W - n.r - 6, n.x));
       n.y = Math.max(n.r + 6, Math.min(H - 20, n.y));
@@ -414,9 +446,82 @@ async function refreshGraph() {
 
 /* --------------------- Export / Import ------------------------- */
 function download(url) {
+  if (state.graphName) url += (url.includes("?") ? "&" : "?") + "graph=" + encodeURIComponent(state.graphName);
   const a = document.createElement("a");
   a.href = url + (TOKEN ? (url.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(TOKEN) : "");
   a.click();
+}
+
+/* ------------------------ Knowledge graphs --------------------- */
+async function loadGraphs() {
+  try {
+    const r = await api("GET", "/graphs");
+    if (state.graphName === null) state.graphName = r.current;
+    const sel = $("#graphsel");
+    sel.innerHTML = r.graphs
+      .map((g) => `<option value="${escapeHtml(g.name)}"${g.name === state.graphName ? " selected" : ""}>`
+        + `${escapeHtml(g.name)} (${g.nodes})</option>`).join("");
+    const cur = r.graphs.find((g) => g.name === state.graphName);
+    $("#btn-del-graph").disabled = !cur || !cur.deletable;
+    $("#btn-ren-graph").disabled = !cur || !cur.deletable;
+    $("#btn-ren-graph").title = cur && cur.deletable
+      ? `Rename the "${state.graphName}" graph` : "The default graph cannot be renamed";
+    $("#btn-del-graph").title = cur && cur.deletable
+      ? `Delete the "${state.graphName}" graph` : "The default graph is protected";
+  } catch (e) { status("Graph list failed: " + e.message, "err"); }
+}
+async function switchGraph(name) {
+  state.graphName = name;
+  state.selected = null; state.typeFilter = null;
+  $("#node-detail").hidden = true; $("#node-empty").hidden = false;
+  await loadGraphs();
+  await refreshGraph();
+  setView("graph");
+  status("Switched to graph: " + name, "ok");
+}
+async function createGraph() {
+  const name = prompt("Name for the new knowledge graph:\n\n" +
+    "(lowercase letters, digits, - and _ only. It starts empty.)");
+  if (name === null) return;                        // cancelled
+  const n = name.trim();
+  if (!n) return;
+  try {
+    const r = await api("POST", "/graph/new?to=" + encodeURIComponent(n));
+    await switchGraph(r.created);                   // open the new graph straight away
+    status(`Created empty graph "${r.created}".`, "ok");
+  } catch (e) { status("Create failed: " + e.message, "err"); }
+}
+async function renameGraph() {
+  const old = state.graphName;
+  if (!old || old === "default") return;
+  const to = prompt(`Rename the knowledge graph "${old}" to:\n\n` +
+    `(lowercase letters, digits, - and _ only. Nodes and links are unaffected.)`, old);
+  if (to === null) return;                          // cancelled
+  const name = to.trim();
+  if (!name || name === old) return;
+  try {
+    const r = await api("POST", "/graph/rename?to=" + encodeURIComponent(name));
+    state.graphName = r.to;
+    await loadGraphs();
+    await refreshGraph();
+    status(`Renamed "${r.renamed}" → "${r.to}".`, "ok");
+  } catch (e) { status("Rename failed: " + e.message, "err"); }
+}
+async function deleteGraph() {
+  const name = state.graphName;
+  if (!name || name === "default") return;
+  const typed = prompt(
+    `Permanently DELETE the knowledge graph "${name}" and every node in it?\n\n` +
+    `This cannot be undone. Type the graph name to confirm:`);
+  if (typed === null) return;                      // cancelled
+  if (typed.trim() !== name) { status("Delete aborted — name did not match.", "err"); return; }
+  try {
+    const r = await api("DELETE", "/graph?confirm=" + encodeURIComponent(name));
+    status(`Deleted graph "${r.deleted}" (${r.nodes_removed} node(s)).`, "ok");
+    state.graphName = null;                        // fall back to the server's graph
+    await loadGraphs();
+    await refreshGraph();
+  } catch (e) { status("Delete failed: " + e.message, "err"); }
 }
 async function doImport(file) {
   try {
@@ -434,6 +539,10 @@ async function doImport(file) {
 function wireEvents() {
   $("#search").addEventListener("input", (e) => { state.query = e.target.value; renderSidebar(); });
   document.querySelectorAll(".tab").forEach((t) => (t.onclick = () => setView(t.dataset.view)));
+  $("#graphsel").addEventListener("change", (e) => switchGraph(e.target.value));
+  $("#btn-new-graph").onclick = createGraph;
+  $("#btn-ren-graph").onclick = renameGraph;
+  $("#btn-del-graph").onclick = deleteGraph;
   $("#sort").addEventListener("change", (e) => { state.sort = e.target.value; renderSidebar(); });
   $("#flt-all").onclick = () => setAllTypes(true);
   $("#flt-none").onclick = () => setAllTypes(false);
@@ -482,6 +591,7 @@ async function init() {
   renderLegend();
   wireEvents();
   try {
+    await loadGraphs();
     await refreshGraph();
     setView("graph");
     status("Loaded " + state.graph.nodes.length + " nodes.", "ok");

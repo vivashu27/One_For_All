@@ -33,6 +33,8 @@ import re
 import sys
 
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
+# Graph names are directory names, so underscores are fine too (node slugs stay kebab-case).
+GRAPH_RE = re.compile(r"^[a-z0-9][a-z0-9_-]*$")
 CONF = {"seed": 0, "low": 1, "medium": 2, "high": 3}
 
 
@@ -158,6 +160,41 @@ def nodes_dir(kb):
     return os.path.join(os.path.abspath(os.path.expanduser(kb)), "nodes")
 
 
+GRAPHS_ROOT = os.path.expanduser("~/.claude/knowledge-graphs")
+DEFAULT_KB = os.path.expanduser("~/.claude/bug-bounty-knowledge")
+
+
+def resolve_graph(name):
+    """Graph name -> directory. 'default' keeps the original KB path (no migration)."""
+    name = (name or "default").strip()
+    if name == "default":
+        return DEFAULT_KB
+    if not GRAPH_RE.match(name):
+        sug = re.sub(r"[^a-z0-9_-]+", "-", name.lower()).strip("-")
+        raise ValueError(f"invalid graph name '{name}' (lowercase letters, digits, - and _ only)"
+                         + (f" — did you mean '{sug}'?" if sug and GRAPH_RE.match(sug) else ""))
+    return os.path.join(GRAPHS_ROOT, name)
+
+
+def roots(a):
+    """[(graph_name, dir)] this invocation addresses. --kb wins; --graph takes a list."""
+    if getattr(a, "kb", None):
+        p = os.path.abspath(os.path.expanduser(a.kb))
+        return [(os.path.basename(p) or "kb", p)]
+    names = [x.strip() for x in (getattr(a, "graph", None) or "default").split(",") if x.strip()]
+    return [(n, resolve_graph(n)) for n in (names or ["default"])]
+
+
+def all_graphs():
+    """Every known graph: 'default' plus each directory under GRAPHS_ROOT."""
+    out = [("default", DEFAULT_KB)]
+    if os.path.isdir(GRAPHS_ROOT):
+        for n in sorted(os.listdir(GRAPHS_ROOT)):
+            if os.path.isdir(os.path.join(GRAPHS_ROOT, n)):
+                out.append((n, os.path.join(GRAPHS_ROOT, n)))
+    return out
+
+
 def node_path(kb, slug):
     if not SLUG_RE.match(slug or ""):
         raise ValueError(f"invalid slug: {slug}")
@@ -168,7 +205,29 @@ def node_path(kb, slug):
     return p
 
 
-def load_nodes(kb):
+def find_node(rs, token):
+    """'slug' or 'graph:slug' -> (graph, dir, slug, filepath), or None."""
+    if ":" in token:
+        g, slug = token.split(":", 1)
+        cands = [(n, p) for (n, p) in rs if n == g]
+        if not cands:
+            try:
+                cands = [(g, resolve_graph(g))]
+            except ValueError:
+                return None
+    else:
+        slug, cands = token, rs
+    for name, p in cands:
+        try:
+            fp = node_path(p, slug)
+        except ValueError:
+            return None
+        if os.path.exists(fp):
+            return name, p, slug, fp
+    return None
+
+
+def load_nodes(kb, graph="default"):
     nd = nodes_dir(kb)
     out = []
     if not os.path.isdir(nd):
@@ -186,15 +245,27 @@ def load_nodes(kb):
             "summary": extract_summary(body),
             "priority": priority_score(meta, today),
             "enabled": enabled(meta),
+            "graph": graph, "path": os.path.join(nd, name),
         })
     return out
 
 
-def compact_line(n):
+def load_many(rs):
+    out = []
+    for name, p in rs:
+        out += load_nodes(p, name)
+    return out
+
+
+def ref(n, multi):
+    return f"{n['graph']}:{n['slug']}" if multi else n["slug"]
+
+
+def compact_line(n, multi=False):
     m = n["meta"]
     pin = " ★" if _truthy(m.get("pin")) else ""
     dis = " (disabled)" if not n["enabled"] else ""
-    return (f"{n['priority']:6.2f}  {n['slug']}  [{m.get('type', '?')}]{pin}  "
+    return (f"{n['priority']:6.2f}  {ref(n, multi)}  [{m.get('type', '?')}]{pin}  "
             f"({m.get('confidence', '?')}·r{_int(m.get('reinforced', 0))}·u{_int(m.get('uses', 0))}) "
             f"— {n['summary']}{dis}")
 
@@ -202,7 +273,8 @@ def compact_line(n):
 def compact_obj(n, extra=None):
     m = n["meta"]
     o = {
-        "slug": n["slug"], "title": m.get("title", n["slug"]), "type": m.get("type"),
+        "slug": n["slug"], "graph": n.get("graph", "default"),
+        "title": m.get("title", n["slug"]), "type": m.get("type"),
         "tags": m.get("tags", []), "vuln_class": m.get("vuln_class", []),
         "confidence": m.get("confidence"), "reinforced": _int(m.get("reinforced", 0)),
         "uses": _int(m.get("uses", 0)), "pin": _truthy(m.get("pin")),
@@ -215,7 +287,8 @@ def compact_obj(n, extra=None):
 
 # ---- commands ----
 def cmd_manifest(a):
-    nodes = load_nodes(a.kb)
+    rs = roots(a); multi = len(rs) > 1
+    nodes = load_many(rs)
     if not a.all:
         nodes = [n for n in nodes if n["enabled"]]
     if a.type:
@@ -226,15 +299,18 @@ def cmd_manifest(a):
         print(json.dumps([compact_obj(n) for n in top], indent=2))
         return
     print(f"# Priority manifest — {len(top)} of {len(nodes)} node(s)"
+          + f"  [graphs: {', '.join(n for n, _ in rs)}]"
           + (f" (type={a.type})" if a.type else "") + "  [priority  slug  [type]  (conf·reinf·uses) — summary]")
     for n in top:
-        print(compact_line(n))
-    print("\nLoad full detail for the few you need:  python3 kb.py get <slug> [<slug> ...]")
+        print(compact_line(n, multi))
+    print(f"\nLoad full detail for the few you need:  python3 kb.py get "
+          f"{'<graph>:<slug>' if multi else '<slug>'} [...]")
 
 
 def cmd_query(a):
     terms = tokenize(a.terms)
-    nodes = [n for n in load_nodes(a.kb) if n["enabled"]]
+    rs = roots(a); multi = len(rs) > 1
+    nodes = [n for n in load_many(rs) if n["enabled"]]
     if a.type:
         nodes = [n for n in nodes if n["meta"].get("type") == a.type]
     if not terms:
@@ -253,15 +329,15 @@ def cmd_query(a):
     if not top:
         print(f"# No matches for: {a.terms}\nTry broader terms, or: python3 kb.py manifest")
         return
-    print(f"# Query: {a.terms!r} — {len(top)} hit(s)  [rank(match)  slug  [type]  (conf·reinf·uses) — summary]")
+    print(f"# Query: {a.terms!r} — {len(top)} hit(s)  [graphs: {', '.join(n for n, _ in rs)}]"
+          "  [rank(match)  slug  [type]  (conf·reinf·uses) — summary]")
     for final, rel, n in top:
-        print(f"{final:6.2f}(m{rel})  {compact_line(n)}")
-    slugs = " ".join(n["slug"] for _, _, n in top[:3])
+        print(f"{final:6.2f}(m{rel})  {compact_line(n, multi)}")
+    slugs = " ".join(ref(n, multi) for _, _, n in top[:3])
     print(f"\nLoad the top ones:  python3 kb.py get {slugs}")
 
 
-def _bump_uses(kb, slug, n=1):
-    p = node_path(kb, slug)
+def _bump_uses(p, n=1):
     with open(p, "r", encoding="utf-8") as fh:
         raw = fh.read()
     meta, _ = parse_frontmatter(raw)
@@ -273,75 +349,193 @@ def _bump_uses(kb, slug, n=1):
 
 
 def cmd_get(a):
+    rs = roots(a); multi = len(rs) > 1
     missing = []
-    for slug in a.slugs:
-        try:
-            p = node_path(a.kb, slug)
-        except ValueError as e:
-            missing.append(f"{slug} ({e})")
+    for token in a.slugs:
+        hit = find_node(rs, token)
+        if not hit:
+            missing.append(token)
             continue
-        if not os.path.exists(p):
-            missing.append(slug)
-            continue
-        with open(p, "r", encoding="utf-8") as fh:
+        graph, _d, slug, fp = hit
+        with open(fp, "r", encoding="utf-8") as fh:
             raw = fh.read()
         meta, _ = parse_frontmatter(raw)
         used = ""
         if not a.peek:
             try:
-                used = f"  (uses→{_bump_uses(a.kb, slug)})"
+                used = f"  (uses→{_bump_uses(fp)})"
             except Exception:
                 used = ""
         flag = "" if enabled(meta) else "  [DISABLED — normally skipped on induce]"
-        print(f"\n===== {slug}{flag}{used} =====")
+        label = f"{graph}:{slug}" if multi else slug
+        print(f"\n===== {label}{flag}{used} =====")
         print(raw.rstrip())
     if missing:
         print(f"\n# not found: {', '.join(missing)}", file=sys.stderr)
 
 
 def cmd_use(a):
-    try:
-        new = _bump_uses(a.kb, a.slug, a.n)
-    except (ValueError, FileNotFoundError) as e:
-        print(f"error: {e}", file=sys.stderr)
+    hit = find_node(roots(a), a.slug)
+    if not hit:
+        print(f"error: not found: {a.slug}", file=sys.stderr)
         return 1
-    print(f"{a.slug}: uses → {new}")
+    print(f"{hit[0]}:{hit[2]}: uses → {_bump_uses(hit[3], a.n)}")
 
 
 def cmd_pin(a):
-    try:
-        p = node_path(a.kb, a.slug)
-    except ValueError as e:
-        print(f"error: {e}", file=sys.stderr)
-        return 1
-    if not os.path.exists(p):
+    hit = find_node(roots(a), a.slug)
+    if not hit:
         print(f"error: not found: {a.slug}", file=sys.stderr)
         return 1
-    with open(p, "r", encoding="utf-8") as fh:
+    fp = hit[3]
+    with open(fp, "r", encoding="utf-8") as fh:
         raw = fh.read()
     raw = update_frontmatter(raw, {"pin": "false" if a.off else "true"})
-    with open(p, "w", encoding="utf-8") as fh:
+    with open(fp, "w", encoding="utf-8") as fh:
         fh.write(raw if raw.endswith("\n") else raw + "\n")
-    print(f"{a.slug}: {'unpinned' if a.off else 'pinned ★'}")
+    print(f"{hit[0]}:{hit[2]}: {'unpinned' if a.off else 'pinned ★'}")
 
 
 def cmd_stats(a):
-    nodes = load_nodes(a.kb)
+    rs = roots(a); multi = len(rs) > 1
+    nodes = load_many(rs)
     en = [n for n in nodes if n["enabled"]]
     by_type = {}
     for n in en:
         by_type[n["meta"].get("type", "?")] = by_type.get(n["meta"].get("type", "?"), 0) + 1
+    print(f"graphs: {', '.join(n for n, _ in rs)}")
     print(f"nodes: {len(nodes)} total · {len(en)} enabled · {len(nodes) - len(en)} disabled")
     print("by type: " + ", ".join(f"{k}={v}" for k, v in sorted(by_type.items())))
     en.sort(key=lambda n: (-n["priority"], n["slug"]))
     print("top of the priority graph:")
     for n in en[:5]:
-        print("  " + compact_line(n))
+        print("  " + compact_line(n, multi))
+
+
+def cmd_graphs(a):
+    rows = all_graphs()
+    print(f"# {len(rows)} knowledge graph(s)   [name  nodes(enabled/total)  path]")
+    for name, p in rows:
+        ns = load_nodes(p, name)
+        en = sum(1 for n in ns if n["enabled"])
+        mark = " (missing)" if not os.path.isdir(p) else ""
+        print(f"  {name:<16} {en}/{len(ns):<6} {p}{mark}")
+    print("\nUse one:  --graph <name>      Several:  --graph a,b      New:  kb.py new <name>")
+
+
+def rename_graph(old, new):
+    """Rename a graph directory. Returns (ok, message). Safe because nothing inside a
+    graph, and no other graph, refers to it by name (links are intra-graph slugs)."""
+    if old == "default" or new == "default":
+        return False, "the 'default' graph cannot be renamed (its path is fixed and commands pass it as --kb)"
+    try:
+        src, dst = resolve_graph(old), resolve_graph(new)
+    except ValueError as e:
+        return False, str(e)
+    if not os.path.isdir(src):
+        return False, f"no such graph: {old}"
+    if os.path.exists(dst):
+        return False, f"graph '{new}' already exists"
+    if os.path.dirname(os.path.realpath(src)) != os.path.realpath(GRAPHS_ROOT):
+        return False, "refusing to rename a directory outside the graphs root"
+    os.rename(src, dst)
+    # INDEX.md is rewritten (with the graph name) on the next reindex; JOURNAL.md is not.
+    p = os.path.join(dst, "JOURNAL.md")
+    if os.path.isfile(p):
+        with open(p, encoding="utf-8") as fh:
+            t = fh.read()
+        t2 = t.replace(f"Knowledge Graph: {old}", f"Knowledge Graph: {new}") \
+              .replace(f"--graph {old}", f"--graph {new}")
+        if t2 != t:
+            with open(p, "w", encoding="utf-8") as fh:
+                fh.write(t2)
+    return True, f"renamed graph '{old}' -> '{new}'"
+
+
+def cmd_rename(a):
+    ok, msg = rename_graph(a.old, a.new)
+    if not ok:
+        print(f"error: {msg}", file=sys.stderr)
+        return 1
+    print(msg)
+    print(f"use it:  --graph {a.new}"
+          "\nnote: restart any running web server that was launched against the old name")
+
+
+def cmd_delete(a):
+    """Delete a whole graph. 'default' is protected; confirmation is always required."""
+    try:
+        p = resolve_graph(a.name)
+    except ValueError as e:
+        print(f"error: {e}", file=sys.stderr)
+        return 1
+    if a.name == "default":
+        print("error: the 'default' graph is protected and cannot be deleted", file=sys.stderr)
+        return 1
+    if not os.path.isdir(p):
+        print(f"error: no such graph: {a.name}", file=sys.stderr)
+        return 1
+    # never remove anything that is not a direct child of the graphs root
+    if os.path.dirname(os.path.realpath(p)) != os.path.realpath(GRAPHS_ROOT):
+        print("error: refusing to delete a directory outside the graphs root", file=sys.stderr)
+        return 1
+    n = len(load_nodes(p, a.name))
+    if a.yes:
+        pass                                  # explicit non-interactive confirmation
+    elif sys.stdin.isatty():
+        print(f"About to permanently delete graph '{a.name}' ({n} node(s)) at {p}")
+        if input(f"Type the graph name to confirm: ").strip() != a.name:
+            print("aborted (name did not match)", file=sys.stderr)
+            return 1
+    else:
+        print(f"error: refusing to delete '{a.name}' ({n} node(s)) without confirmation — "
+              f"re-run with --yes, or run it interactively", file=sys.stderr)
+        return 1
+    import shutil
+    shutil.rmtree(os.path.realpath(p))
+    print(f"deleted graph '{a.name}' ({n} node(s) removed) from {p}")
+
+
+def create_graph(name, seed=False):
+    """Create a new, separate graph. Returns (ok, message, path)."""
+    if name == "default":
+        return False, "'default' is the existing graph", None
+    try:
+        p = resolve_graph(name)
+    except ValueError as e:
+        return False, str(e), None
+    if os.path.isdir(p):
+        return False, f"graph '{name}' already exists at {p}", None
+    os.makedirs(os.path.join(p, "nodes"), exist_ok=True)
+    seeddir = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "knowledge-seed")
+    if seed and os.path.isdir(seeddir):
+        import shutil
+        shutil.copytree(seeddir, p, dirs_exist_ok=True)
+    else:
+        d = datetime.date.today().isoformat()
+        with open(os.path.join(p, "INDEX.md"), "w", encoding="utf-8") as fh:
+            fh.write(f"# Knowledge Graph: {name} — Index\n\n_Last updated: {d} · 0 nodes_\n\n"
+                     "Grow it with `/build-knowledge --graph " + name + "`.\n")
+        with open(os.path.join(p, "JOURNAL.md"), "w", encoding="utf-8") as fh:
+            fh.write(f"# Knowledge Graph: {name} — Journal\n\nNewest entries on top.\n\n---\n\n"
+                     f"## {d} — Created\n- Empty graph created.\n")
+    return True, f"created graph '{name}' at {p}" + (" (seeded from knowledge-seed)" if seed else " (empty)"), p
+
+
+def cmd_new(a):
+    ok, msg, _ = create_graph(a.name, a.seed)
+    if not ok:
+        print(f"error: {msg}", file=sys.stderr)
+        return 1
+    print(msg)
+    print(f"use it:  --graph {a.name}")
 
 
 def main():
     ap = argparse.ArgumentParser(description="Priority-ranked retrieval over the bug-bounty knowledge graph")
-    ap.add_argument("--kb", default=os.path.expanduser("~/.claude/bug-bounty-knowledge"))
+    ap.add_argument("--graph", default=None,
+                    help="graph name, or a comma list to read several at once (default: 'default')")
+    ap.add_argument("--kb", default=None, help="explicit KB directory; overrides --graph")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
     m = sub.add_parser("manifest"); m.add_argument("--top", type=int, default=0); m.add_argument("--type"); m.add_argument("--json", action="store_true"); m.add_argument("--all", action="store_true"); m.set_defaults(fn=cmd_manifest)
@@ -350,9 +544,19 @@ def main():
     u = sub.add_parser("use"); u.add_argument("slug"); u.add_argument("--n", type=int, default=1); u.set_defaults(fn=cmd_use)
     p = sub.add_parser("pin"); p.add_argument("slug"); p.add_argument("--off", action="store_true"); p.set_defaults(fn=cmd_pin)
     s = sub.add_parser("stats"); s.set_defaults(fn=cmd_stats)
+    gl = sub.add_parser("graphs"); gl.set_defaults(fn=cmd_graphs)
+    dl = sub.add_parser("delete"); dl.add_argument("name"); dl.add_argument("--yes", action="store_true",
+        help="confirm non-interactively (required when stdin is not a TTY)"); dl.set_defaults(fn=cmd_delete)
+    rn = sub.add_parser("rename"); rn.add_argument("old"); rn.add_argument("new"); rn.set_defaults(fn=cmd_rename)
+    nw = sub.add_parser("new"); nw.add_argument("name"); nw.add_argument("--seed", action="store_true",
+        help="copy the shipped bug-bounty seed nodes into the new graph (default: empty)"); nw.set_defaults(fn=cmd_new)
 
     a = ap.parse_args()
-    sys.exit(a.fn(a) or 0)
+    try:
+        sys.exit(a.fn(a) or 0)
+    except ValueError as e:   # bad --graph name etc: clean message, not a traceback
+        print(f"error: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

@@ -55,6 +55,43 @@ agent uses `query` → `get` to recall only the 1–3 relevant nodes. `get` bump
 node's `uses`, so relevance **compounds** the same way knowledge does. Disabled nodes are
 excluded from `manifest`/`query`; `--kb` defaults to `~/.claude/bug-bounty-knowledge`.
 
+## Multiple knowledge graphs
+
+You can keep several independent graphs — e.g. one for web bug bounty, one for web3, one
+for client pentests — with no shared nodes:
+
+| Graph | Lives at |
+|---|---|
+| `default` | `~/.claude/bug-bounty-knowledge/` (the original store, never moved) |
+| `<name>` | `~/.claude/knowledge-graphs/<name>/` |
+
+```bash
+python3 web/kb.py graphs                         # list graphs + node counts
+python3 web/kb.py new web3                       # create a new EMPTY graph (--seed to copy seeds)
+python3 web/kb.py rename web3 defi_audits        # rename at any time (nodes/links unaffected)
+python3 web/kb.py delete web3 --yes              # delete (prompts when interactive)
+python3 web/kb.py --graph web3 manifest          # one graph
+python3 web/kb.py --graph default,web3 query ... # read several at once (union)
+```
+
+- **Compound into a chosen graph:** `/build-knowledge --graph web3` — writes to that graph only.
+- **Induce one or several:** `/induce-knowledge --graph default,web3` — with more than one
+  loaded, nodes are addressed `graph:slug`, which you pass back to `get`.
+- **Serve one in the web UI:** `/serve-knowledge --graph web3` (the UI shows one graph at a time).
+
+Slugs are unique only *within* a graph. A named graph must exist first — the commands
+won't create one implicitly.
+
+**Renaming is safe at any time.** Links (`related:`) are always intra-graph slugs and no
+node stores its own graph name, so a rename can't dangle a reference; node content,
+`uses`, `pin` and `enabled` are all preserved. The ✎ button in the web UI does it too.
+Three rules are enforced: `default` can't be renamed (its path is fixed and every command
+passes it as `--kb`), the target name must be free, and it must be a valid graph name.
+
+> If you rename the graph a **running** web server was launched against, restart that
+> server (`/One_For_All:serve-knowledge --stop`, then start it again) — its `--kb` still
+> points at the old directory.
+
 ## Automatic awareness (no command needed)
 
 A `SessionStart` hook (`hooks/prime.py`) injects a tiny pointer (~1–2 sentences + the
@@ -97,7 +134,12 @@ sync with `/build-knowledge` and `/induce-knowledge`.
 Safety: binds to `127.0.0.1` only unless you pass `--host`; slugs are strictly
 validated and all file access is confined to `nodes/`; non-localhost binds print a
 warning and should be paired with `--token` (the UI forwards the token on every API
-call). Run it directly without the plugin if you like:
+call). Writes are additionally protected against cross-site requests (any POST/PUT/DELETE
+carrying a foreign `Origin` is refused, so a web page you visit cannot touch your
+knowledge base), capped at 8 MB per request, serialised with a lock, and written
+atomically.
+
+Tests: `./tests/run.sh` — plain `python3` + `node`, no framework or dependencies. Run it directly without the plugin if you like:
 `python3 web/server.py --kb ~/.claude/bug-bounty-knowledge`.
 
 ## What gets stored
@@ -141,6 +183,7 @@ Bug_Bounty_Knowledge_Memory_builder/
 ├── hooks/                    # auto-awareness
 │   ├── hooks.json            # SessionStart hook registration
 │   └── prime.py              # injects a tiny KB pointer into every session
+├── tests/                    # no framework: python3 + node. Run: ./tests/run.sh
 ├── web/                      # local web interface + retrieval CLI (dependency-free)
 │   ├── server.py             # stdlib HTTP server: JSON API + static files
 │   ├── kb.py                 # priority-ranked, just-in-time recall CLI

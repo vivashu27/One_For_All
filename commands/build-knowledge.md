@@ -1,6 +1,6 @@
 ---
 description: Harvest durable, reusable knowledge from this assessment and compound it into the global bug-bounty knowledge graph (dedupes, reinforces, and links).
-argument-hint: "[optional focus, e.g. idor,graphql or \"the oauth trick that worked\"]"
+argument-hint: "[optional focus, e.g. idor,graphql] [--graph <name> to target a specific knowledge graph]"
 ---
 
 You are running **BUILD-KNOWLEDGE** mode for One For All (bug-bounty knowledge memory).
@@ -11,7 +11,13 @@ Load and follow the **`knowledge-graph`** skill now, then execute its **BUILD mo
 Focus hint from the user (may be empty): `$ARGUMENTS`
 
 Do this:
-1. Bootstrap the knowledge base (skill §1) and confirm the absolute KB path.
+1. **Pick the target graph.** `--graph <name>` in `$ARGUMENTS` selects which knowledge
+   graph to compound into; otherwise use `default`. Resolve the directory: `default` →
+   `$HOME/.claude/bug-bounty-knowledge`, any other name →
+   `$HOME/.claude/knowledge-graphs/<name>`. Verify it exists
+   (`python3 "$KBPY" graphs`); if the named graph does not exist, stop and tell the user
+   to create it with `python3 "$KBPY" new <name>` rather than inventing it. Then
+   bootstrap (skill §1) and confirm the absolute path. **Write only into that graph.**
 2. Review this session / assessment and extract durable, **reusable** knowledge:
    techniques & tricks that worked, tools that helped (and how), references/links
    worth keeping, lessons learned, workflow improvements, and reporting insights.

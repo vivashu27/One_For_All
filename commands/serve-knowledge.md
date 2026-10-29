@@ -1,6 +1,6 @@
 ---
 description: Launch the local web interface to view, edit, and share the bug-bounty knowledge graph (interactive graph, node editor, export/import). Dependency-free Python server, localhost by default.
-argument-hint: "[--port 8787] [--host 0.0.0.0 to share on LAN] [--token SECRET] [--stop]"
+argument-hint: "[--graph <name>] [--port 8787] [--host 0.0.0.0 to share on LAN] [--token SECRET] [--stop]"
 ---
 
 You are launching the **knowledge-graph web interface** for the Bug Bounty Knowledge
@@ -10,9 +10,15 @@ Arguments from the user (may be empty): `$ARGUMENTS`
 
 Do this:
 
-1. **Bootstrap** the knowledge base so it exists (idempotent):
+1. **Pick the starting graph and bootstrap it** (idempotent). `--graph <name>` sets which
+   graph the UI opens on (default `default`); the UI itself has a **Graph dropdown** that
+   can switch to any other graph without restarting the server. Resolve `default` →
+   `$HOME/.claude/bug-bounty-knowledge`, any other name →
+   `$HOME/.claude/knowledge-graphs/<name>` (list with
+   `python3 "${CLAUDE_PLUGIN_ROOT}/web/kb.py" graphs`). Then pass that directory as
+   `--kb`, and mention which graph you are serving in the final message.
    ```bash
-   KB="$HOME/.claude/bug-bounty-knowledge"
+   KB="$HOME/.claude/bug-bounty-knowledge"   # or $HOME/.claude/knowledge-graphs/<name>
    mkdir -p "$KB/nodes"
    if [ ! -f "$KB/INDEX.md" ] && [ -d "${CLAUDE_PLUGIN_ROOT:-/nonexistent}/knowledge-seed" ]; then
      cp -r "${CLAUDE_PLUGIN_ROOT}/knowledge-seed/." "$KB/"

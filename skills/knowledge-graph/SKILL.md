@@ -46,6 +46,35 @@ Use the **absolute** path it prints for all Read/Write/Edit calls (on this machi
 that resolves to `/home/pentest/.claude/bug-bounty-knowledge`). Never write to the
 plugin's `knowledge-seed/` — that is a read-only template.
 
+### Multiple knowledge graphs
+
+There can be **several independent graphs**, each with its own `nodes/`, `INDEX.md` and
+`JOURNAL.md` — nothing is shared between them:
+
+- `default` → `~/.claude/bug-bounty-knowledge/` (the original store; never moved)
+- any other name → `~/.claude/knowledge-graphs/<name>/`
+
+Graph names are lowercase, digits, `-` and `_`. `kb.py` owns the resolution, so prefer passing
+`--graph <name>` over hand-building paths:
+
+```bash
+python3 "$KBPY" graphs              # list every graph + node counts
+python3 "$KBPY" new <name>          # create a new, EMPTY graph (--seed to copy the shipped seeds)
+python3 "$KBPY" rename <old> <new>  # rename a graph (safe: links are intra-graph slugs)
+python3 "$KBPY" delete <name>       # delete a graph (confirmation required; 'default' protected)
+python3 "$KBPY" --graph web3 ...    # operate on one graph
+python3 "$KBPY" --graph default,web3 manifest   # read several at once (union)
+```
+
+Rules:
+- **BUILD writes to exactly one graph** — the one named by `--graph`, else `default`.
+  Never split one session's knowledge across graphs, and never create a graph implicitly:
+  if the user names a graph that doesn't exist, say so and point at `kb.py new`.
+- **INDUCE/RECALL may read several** (`--graph a,b`). With more than one loaded, every
+  node is addressed as `graph:slug`; pass that exact ref back to `get`.
+- Slugs are only unique *within* a graph, so always keep the `graph:` prefix when
+  juggling more than one.
+
 The same store is also browsable/editable through the local web interface
 (`/serve-knowledge` → `web/server.py`), which reads and writes these exact files — so
 edits made there and by these commands stay in sync. Keep the schema below stable so
@@ -202,7 +231,7 @@ task doesn't need.
 `nodes/`:
 
 ```markdown
-# Bug Bounty Knowledge Graph — Index
+# Knowledge Graph: <name> — Index
 
 _Last updated: <date> · <N> nodes_
 
@@ -263,6 +292,11 @@ knowledge rises automatically.
   priority (`--peek` to read without counting). This is the "compounding relevance" loop.
 - `python3 "$KBPY" --kb "$KB" pin <slug> [--off]` — pin/unpin a node to force it top.
 - `python3 "$KBPY" --kb "$KB" stats` — totals + current top of the priority graph.
+- `python3 "$KBPY" graphs` / `new <name> [--seed]` — list / create knowledge graphs.
+
+Prefer `--graph <name[,name]>` over `--kb "$KB"` in these commands to choose which
+graph(s) to act on (see §1 "Multiple knowledge graphs"); `--kb <dir>` still works and
+overrides `--graph`.
 
 `kb.py` excludes `enabled: false` nodes from `manifest`/`query` (they stay retired).
 Prefer recall (`query` → `get`) over re-reading the whole graph whenever you need prior

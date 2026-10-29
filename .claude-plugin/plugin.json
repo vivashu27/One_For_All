@@ -1,6 +1,6 @@
 {
   "name": "One_For_All",
-  "version": "1.5.0",
+  "version": "1.10.0",
   "description": "A compounding knowledge-graph memory for bug bounty and security assessments. Agents collect techniques, tools, references, lessons, and reporting insights during one assessment (/build-knowledge) and reuse them in future sessions. A priority graph + stdlib recall CLI (web/kb.py) lets agents load only task-relevant knowledge just-in-time (/induce-knowledge primes a compact manifest; /recall-knowledge fetches on the fly) so context stays flat as the graph grows. A SessionStart hook makes the agent aware of the graph automatically. Includes a dependency-free local web interface (/serve-knowledge) to view, edit, enable/disable, sort, filter, and share the graph.",
   "author": {
     "name": "pentest"

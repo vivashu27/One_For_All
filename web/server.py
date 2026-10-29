@@ -21,7 +21,10 @@ import io
 import json
 import os
 import re
+import shutil
 import sys
+import tempfile
+import threading
 import zipfile
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs
@@ -41,8 +44,13 @@ TYPE_HEADING = {
 }
 
 # Set by main()
-KB_DIR = ""
-NODES_DIR = ""
+KB_DIR = ""        # graph selected at launch; the UI can switch per request
+WRITE_LOCK = threading.RLock()   # serialises read-modify-write so edits cannot be lost
+# shortcut: this lock is per-process only, so a kb.py run firing at the same instant as a
+# web edit can still last-writer-win on one counter; upgrade to an on-disk lock file if the
+# CLI and the web UI end up being used together routinely.
+import kb as kblib   # always beside this file; also the single source of the parser
+from kb import parse_frontmatter, extract_summary, update_frontmatter
 STATIC_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "static")
 TOKEN = ""
 
@@ -54,58 +62,31 @@ def today():
 # --------------------------------------------------------------------------- #
 # Frontmatter (minimal YAML subset: scalars, ints, bools, inline [lists])     #
 # --------------------------------------------------------------------------- #
-def parse_value(val):
-    val = val.strip()
-    if val == "":
-        return ""
-    if val.startswith("[") and val.endswith("]"):
-        inner = val[1:-1].strip()
-        if not inner:
-            return []
-        return [x.strip().strip("\"'") for x in inner.split(",") if x.strip()]
-    low = val.lower()
-    if low in ("true", "false"):
-        return low == "true"
-    if re.match(r"^-?\d+$", val):
-        return int(val)
-    return val.strip("\"'")
+def nodes_dir(kb):
+    return os.path.join(kb, "nodes")
 
 
-def parse_frontmatter(text):
-    """Return (meta_dict, body_str)."""
-    meta = {}
-    body = text
-    m = re.match(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", text, re.S)
-    if m:
-        fm, body = m.group(1), m.group(2)
-        for line in fm.split("\n"):
-            raw = line.rstrip()
-            if not raw or raw.lstrip().startswith("#") or ":" not in raw:
-                continue
-            key, _, val = raw.partition(":")
-            meta[key.strip()] = parse_value(val)
-    return meta, body
+def graph_map():
+    """name -> directory for every graph this server may address."""
+    m = dict(kblib.all_graphs())
+    if KB_DIR and os.path.isdir(KB_DIR) and os.path.abspath(KB_DIR) not in [os.path.abspath(d) for d in m.values()]:
+        m[os.path.basename(KB_DIR.rstrip("/")) or "kb"] = KB_DIR
+    return m
 
 
-def extract_summary(body):
-    m = re.search(r"\*\*Summary:\*\*\s*(.+)", body)
-    if m:
-        return re.sub(r"\s+", " ", m.group(1).strip())
-    for line in body.split("\n"):
-        s = line.strip()
-        if s and not s.startswith("#") and not s.startswith("---"):
-            return re.sub(r"\s+", " ", s)
-    return ""
+def current_graph():
+    for n, d in graph_map().items():
+        if os.path.abspath(d) == os.path.abspath(KB_DIR):
+            return n
+    return "default"
 
 
-# --------------------------------------------------------------------------- #
-# KB access                                                                   #
-# --------------------------------------------------------------------------- #
-def node_path(slug):
+def node_path(kb, slug):
     if not SLUG_RE.match(slug or ""):
         raise ValueError("invalid slug")
-    p = os.path.join(NODES_DIR, slug + ".md")
-    if os.path.dirname(os.path.realpath(p)) != os.path.realpath(NODES_DIR):
+    nd = nodes_dir(kb)
+    p = os.path.join(nd, slug + ".md")
+    if os.path.dirname(os.path.realpath(p)) != os.path.realpath(nd):
         raise ValueError("path escape")
     return p
 
@@ -119,21 +100,39 @@ def read_text(path):
 
 
 def write_text(path, text):
+    """Atomic: write a temp file in the same dir, then replace. No truncated files."""
     if not text.endswith("\n"):
         text += "\n"
-    with open(path, "w", encoding="utf-8") as fh:
-        fh.write(text)
+    d = os.path.dirname(os.path.abspath(path))
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".tmp-", suffix=".md")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
 
 
-def list_nodes():
+def count_nodes(kb):
+    """Just how many nodes, without parsing any of them."""
+    nd = nodes_dir(kb)
+    if not os.path.isdir(nd):
+        return 0
+    return sum(1 for f in os.listdir(nd) if f.endswith(".md"))
+
+
+def list_nodes(kb):
     out = []
-    if not os.path.isdir(NODES_DIR):
+    nd = nodes_dir(kb)
+    if not os.path.isdir(nd):
         return out
-    for name in sorted(os.listdir(NODES_DIR)):
+    for name in sorted(os.listdir(nd)):
         if not name.endswith(".md"):
             continue
         slug = name[:-3]
-        raw = read_text(os.path.join(NODES_DIR, name))
+        raw = read_text(os.path.join(nd, name))
         if raw is None:
             continue
         meta, body = parse_frontmatter(raw)
@@ -142,8 +141,8 @@ def list_nodes():
     return out
 
 
-def build_graph():
-    nodes = list_nodes()
+def build_graph(kb):
+    nodes = list_nodes(kb)
     ids = {n["slug"] for n in nodes}
     out_nodes = []
     for n in nodes:
@@ -207,32 +206,21 @@ def scaffold(slug, title, ntype, tags, summary):
     )
 
 
-def update_frontmatter(raw, updates):
-    """Set/insert frontmatter keys losslessly. `updates`: {key: serialized_str}."""
-    m = re.match(r"^(---\s*\n)(.*?\n)(---\s*\n?)(.*)$", raw, re.S)
-    if not m:
-        return raw  # no frontmatter block; leave untouched
-    head, fm, close, body = m.group(1), m.group(2), m.group(3), m.group(4)
-    lines = fm.rstrip("\n").split("\n")
-    for key, val in updates.items():
-        pat = re.compile(rf"^{re.escape(key)}\s*:")
-        for i, line in enumerate(lines):
-            if pat.match(line):
-                lines[i] = f"{key}: {val}"
-                break
-        else:
-            lines.append(f"{key}: {val}")
-    return head + "\n".join(lines) + "\n" + close + body
+def graph_name_for(kb):
+    for n, d in graph_map().items():
+        if os.path.abspath(d) == os.path.abspath(kb):
+            return n
+    return os.path.basename(kb.rstrip("/")) or "default"
 
 
-def regenerate_index():
+def regenerate_index(kb):
     """Rewrite INDEX.md from the current nodes, matching the skill's format."""
-    graph = build_graph()
+    graph = build_graph(kb)
     nodes = graph["nodes"]
     by_type = {t: [] for t in TYPE_ORDER}
     for n in nodes:
         by_type.setdefault(n["type"], []).append(n)
-    lines = ["# Bug Bounty Knowledge Graph — Index", ""]
+    lines = [f"# Knowledge Graph: {graph_name_for(kb)} — Index", ""]
     lines.append(f"_Last updated: {today()} · {len(nodes)} nodes_")
     lines.append("")
     lines.append("This is the hub of the compounding knowledge graph. Each entry links to a node in")
@@ -259,27 +247,27 @@ def regenerate_index():
             lines.append(f"- {n['id']} → {', '.join(rels)}")
     lines.append("")
     lines.append("_Format per entry: `[[slug]] — summary (confidence · reinforced-count)`._")
-    write_text(os.path.join(KB_DIR, "INDEX.md"), "\n".join(lines))
+    write_text(os.path.join(kb, "INDEX.md"), "\n".join(lines))
 
 
-def export_zip():
+def export_zip(kb, name):
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for fname in ("INDEX.md", "JOURNAL.md"):
-            txt = read_text(os.path.join(KB_DIR, fname))
+            txt = read_text(os.path.join(kb, fname))
             if txt is not None:
-                zf.writestr(f"bug-bounty-knowledge/{fname}", txt)
-        for n in list_nodes():
-            zf.writestr(f"bug-bounty-knowledge/nodes/{n['slug']}.md", n["raw"])
+                zf.writestr(f"{name}/{fname}", txt)
+        for n in list_nodes(kb):
+            zf.writestr(f"{name}/nodes/{n['slug']}.md", n["raw"])
     return buf.getvalue()
 
 
-def export_json():
+def export_json(kb, name):
+    # only fields that import can restore; use the .zip for a full backup (INDEX + JOURNAL)
     return {
         "generated": datetime.datetime.now().isoformat(timespec="seconds"),
-        "index": read_text(os.path.join(KB_DIR, "INDEX.md")) or "",
-        "journal": read_text(os.path.join(KB_DIR, "JOURNAL.md")) or "",
-        "nodes": [{"slug": n["slug"], "raw": n["raw"]} for n in list_nodes()],
+        "graph": name,
+        "nodes": [{"slug": n["slug"], "raw": n["raw"]} for n in list_nodes(kb)],
     }
 
 
@@ -294,6 +282,24 @@ class Handler(BaseHTTPRequestHandler):
         sys.stderr.write("%s - %s\n" % (self.address_string(), msg))
 
     # -- helpers --
+    def _kb(self, query):
+        """Graph dir for this request. Raises KeyError on an unknown graph name."""
+        name = (query.get("graph", [""])[0] or "").strip()
+        if not name:
+            return KB_DIR
+        gm = graph_map()
+        if name not in gm:
+            raise KeyError(name)
+        return gm[name]
+
+    def _origin_ok(self):
+        """Block cross-site writes (CSRF). Browsers always send Origin on a POST; CLI
+        tools and agents send none, so they are unaffected."""
+        origin = self.headers.get("Origin")
+        if not origin:
+            return True
+        return urlparse(origin).netloc == (self.headers.get("Host") or "")
+
     def _token_ok(self, query):
         if not TOKEN:
             return True
@@ -318,8 +324,12 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    MAX_BODY = 8 * 1024 * 1024
+
     def _body_json(self):
         length = int(self.headers.get("Content-Length", 0) or 0)
+        if length > self.MAX_BODY:
+            raise ValueError("request body too large")
         if length <= 0:
             return {}
         try:
@@ -353,24 +363,33 @@ class Handler(BaseHTTPRequestHandler):
         if path.startswith("/api/"):
             if not self._token_ok(query):
                 return self._json({"error": "unauthorized"}, 401)
+            try:
+                kb = self._kb(query)
+            except KeyError as e:
+                return self._json({"error": f"unknown graph: {e.args[0]}"}, 400)
             if path == "/api/ping":
-                return self._json({"ok": True, "kb": KB_DIR})
+                return self._json({"ok": True, "kb": kb, "graph": current_graph()})
+            if path == "/api/graphs":
+                gm, cur = graph_map(), current_graph()
+                rows = [{"name": n, "dir": d, "nodes": count_nodes(d),
+                         "current": n == cur, "deletable": n != "default"}
+                        for n, d in sorted(gm.items())]
+                return self._json({"graphs": rows, "current": cur})
             if path == "/api/graph":
-                return self._json(build_graph())
+                return self._json(build_graph(kb))
             if path == "/api/journal":
-                return self._json({"text": read_text(os.path.join(KB_DIR, "JOURNAL.md")) or ""})
-            if path == "/api/index":
-                return self._json({"text": read_text(os.path.join(KB_DIR, "INDEX.md")) or ""})
+                return self._json({"text": read_text(os.path.join(kb, "JOURNAL.md")) or ""})
             if path == "/api/export":
                 fmt = query.get("format", ["zip"])[0]
+                gname = graph_name_for(kb)
                 if fmt == "json":
-                    data = json.dumps(export_json(), indent=2).encode("utf-8")
-                    return self._bytes(data, "application/json", filename=f"bug-bounty-knowledge-{today()}.json")
-                return self._bytes(export_zip(), "application/zip", filename=f"bug-bounty-knowledge-{today()}.zip")
+                    data = json.dumps(export_json(kb, gname), indent=2).encode("utf-8")
+                    return self._bytes(data, "application/json", filename=f"{gname}-{today()}.json")
+                return self._bytes(export_zip(kb, gname), "application/zip", filename=f"{gname}-{today()}.zip")
             m = re.match(r"^/api/node/([^/]+)$", path)
             if m:
                 try:
-                    p = node_path(m.group(1))
+                    p = node_path(kb, m.group(1))
                 except ValueError:
                     return self._json({"error": "invalid slug"}, 400)
                 raw = read_text(p)
@@ -383,17 +402,30 @@ class Handler(BaseHTTPRequestHandler):
         return self._static(path)
 
     def do_POST(self):
+        if not self._origin_ok():
+            return self._json({"error": "cross-site request blocked"}, 403)
+        try:
+            with WRITE_LOCK:
+                return self._post_locked()
+        except ValueError as e:
+            return self._json({"error": str(e)}, 413 if "too large" in str(e) else 400)
+
+    def _post_locked(self):
         u = urlparse(self.path)
         path, query = u.path, parse_qs(u.query)
         if not self._token_ok(query):
             return self._json({"error": "unauthorized"}, 401)
+        try:
+            kb = self._kb(query)
+        except KeyError as e:
+            return self._json({"error": f"unknown graph: {e.args[0]}"}, 400)
         if path == "/api/node":
             d = self._body_json()
             slug = (d.get("slug") or "").strip().lower()
             if not SLUG_RE.match(slug):
                 return self._json({"error": "slug must be lowercase kebab-case [a-z0-9-]"}, 400)
             try:
-                p = node_path(slug)
+                p = node_path(kb, slug)
             except ValueError:
                 return self._json({"error": "invalid slug"}, 400)
             if os.path.exists(p):
@@ -405,12 +437,12 @@ class Handler(BaseHTTPRequestHandler):
             if isinstance(tags, str):
                 tags = [t.strip() for t in tags.split(",") if t.strip()]
             write_text(p, scaffold(slug, d.get("title") or slug, ntype, tags, d.get("summary", "")))
-            regenerate_index()
+            regenerate_index(kb)
             return self._json({"ok": True, "slug": slug})
         m = re.match(r"^/api/node/([^/]+)/enabled$", path)
         if m:
             try:
-                p = node_path(m.group(1))
+                p = node_path(kb, m.group(1))
             except ValueError:
                 return self._json({"error": "invalid slug"}, 400)
             raw = read_text(p)
@@ -420,41 +452,77 @@ class Handler(BaseHTTPRequestHandler):
             raw = update_frontmatter(raw, {"enabled": "true" if enabled else "false",
                                            "updated": today()})
             write_text(p, raw)
-            regenerate_index()
+            regenerate_index(kb)
             return self._json({"ok": True, "slug": m.group(1), "enabled": enabled})
+        if path == "/api/graph/new":
+            name = (query.get("to", [""])[0] or "").strip()
+            seed = (query.get("seed", [""])[0] or "").strip() in ("1", "true", "yes")
+            if not name:
+                return self._json({"error": "need ?to=<name>"}, 400)
+            ok, msg, _p = kblib.create_graph(name, seed)
+            if not ok:
+                return self._json({"error": msg}, 400)
+            return self._json({"ok": True, "created": name, "message": msg})
+        if path == "/api/graph/rename":
+            old = (query.get("graph", [""])[0] or "").strip()
+            new = (query.get("to", [""])[0] or "").strip()
+            if not old or not new:
+                return self._json({"error": "need ?graph=<old>&to=<new>"}, 400)
+            ok, msg = kblib.rename_graph(old, new)
+            if not ok:
+                return self._json({"error": msg}, 400)
+            return self._json({"ok": True, "renamed": old, "to": new, "message": msg})
         if path == "/api/reindex":
-            regenerate_index()
+            regenerate_index(kb)
             return self._json({"ok": True})
         if path == "/api/import":
             d = self._body_json()
             nodes = d.get("nodes", [])
+            if not isinstance(nodes, list):
+                return self._json({"error": "'nodes' must be a list"}, 400)
             written, skipped = [], []
             for item in nodes:
+                if not isinstance(item, dict):
+                    skipped.append("(not an object)")
+                    continue
                 slug = (item.get("slug") or "").strip().lower()
                 raw = item.get("raw", "")
                 if not SLUG_RE.match(slug) or not raw.strip().startswith("---"):
                     skipped.append(slug or "(blank)")
                     continue
                 try:
-                    write_text(node_path(slug), raw)
+                    write_text(node_path(kb, slug), raw)
                     written.append(slug)
                 except ValueError:
                     skipped.append(slug)
-            regenerate_index()
+            regenerate_index(kb)
             return self._json({"ok": True, "written": written, "skipped": skipped})
         return self._json({"error": "unknown endpoint"}, 404)
 
     def do_PUT(self):
+        if not self._origin_ok():
+            return self._json({"error": "cross-site request blocked"}, 403)
+        try:
+            with WRITE_LOCK:
+                return self._put_locked()
+        except ValueError as e:
+            return self._json({"error": str(e)}, 413 if "too large" in str(e) else 400)
+
+    def _put_locked(self):
         u = urlparse(self.path)
         path, query = u.path, parse_qs(u.query)
         if not self._token_ok(query):
             return self._json({"error": "unauthorized"}, 401)
+        try:
+            kb = self._kb(query)
+        except KeyError as e:
+            return self._json({"error": f"unknown graph: {e.args[0]}"}, 400)
         m = re.match(r"^/api/node/([^/]+)$", path)
         if not m:
             return self._json({"error": "unknown endpoint"}, 404)
         slug = m.group(1)
         try:
-            p = node_path(slug)
+            p = node_path(kb, slug)
         except ValueError:
             return self._json({"error": "invalid slug"}, 400)
         d = self._body_json()
@@ -467,30 +535,62 @@ class Handler(BaseHTTPRequestHandler):
         # bump updated: to today — frontmatter-scoped, inserts the key if missing
         raw = update_frontmatter(raw, {"updated": today()})
         write_text(p, raw)
-        regenerate_index()
+        regenerate_index(kb)
         return self._json({"ok": True, "slug": slug})
 
     def do_DELETE(self):
+        if not self._origin_ok():
+            return self._json({"error": "cross-site request blocked"}, 403)
+        try:
+            with WRITE_LOCK:
+                return self._delete_locked()
+        except ValueError as e:
+            return self._json({"error": str(e)}, 413 if "too large" in str(e) else 400)
+
+    def _delete_locked(self):
         u = urlparse(self.path)
         path, query = u.path, parse_qs(u.query)
         if not self._token_ok(query):
             return self._json({"error": "unauthorized"}, 401)
+        try:
+            kb = self._kb(query)
+        except KeyError as e:
+            return self._json({"error": f"unknown graph: {e.args[0]}"}, 400)
+        if path == "/api/graph":
+            name = (query.get("graph", [""])[0] or "").strip()
+            confirm = (query.get("confirm", [""])[0] or "").strip()
+            gm = graph_map()
+            if not name or name not in gm:
+                return self._json({"error": "unknown graph"}, 400)
+            if name == "default":
+                return self._json({"error": "the 'default' graph is protected and cannot be deleted"}, 403)
+            if confirm != name:
+                return self._json({"error": "confirmation required: echo the graph name in ?confirm="}, 400)
+            d = gm[name]
+            # only ever remove a directory that really sits under the graphs root
+            root = os.path.realpath(kblib.GRAPHS_ROOT)
+            rp = os.path.realpath(d)
+            if os.path.dirname(rp) != root:
+                return self._json({"error": "refusing to delete a graph outside the graphs root"}, 403)
+            n_nodes = len(list_nodes(d))
+            shutil.rmtree(rp)
+            return self._json({"ok": True, "deleted": name, "nodes_removed": n_nodes})
         m = re.match(r"^/api/node/([^/]+)$", path)
         if not m:
             return self._json({"error": "unknown endpoint"}, 404)
         try:
-            p = node_path(m.group(1))
+            p = node_path(kb, m.group(1))
         except ValueError:
             return self._json({"error": "invalid slug"}, 400)
         if not os.path.exists(p):
             return self._json({"error": "not found"}, 404)
         os.remove(p)
-        regenerate_index()
+        regenerate_index(kb)
         return self._json({"ok": True})
 
 
 def main():
-    global KB_DIR, NODES_DIR, TOKEN
+    global KB_DIR, TOKEN
     ap = argparse.ArgumentParser(description="Bug Bounty Knowledge web interface")
     ap.add_argument("--kb", default=os.path.expanduser("~/.claude/bug-bounty-knowledge"),
                     help="knowledge base directory")
@@ -500,9 +600,9 @@ def main():
     args = ap.parse_args()
 
     KB_DIR = os.path.abspath(os.path.expanduser(args.kb))
-    NODES_DIR = os.path.join(KB_DIR, "nodes")
+
     TOKEN = args.token
-    os.makedirs(NODES_DIR, exist_ok=True)
+    os.makedirs(nodes_dir(KB_DIR), exist_ok=True)
 
     httpd = ThreadingHTTPServer((args.host, args.port), Handler)
     url = f"http://{args.host}:{args.port}/"
