@@ -205,11 +205,6 @@ plugin:
 /plugin install One_For_All@bug-bounty-knowledge-marketplace
 ```
 
-> The two `.claude-plugin/` manifest files are intentionally **not** tracked in git, so a
-> fresh clone is not installable as-is: recreate `.claude-plugin/plugin.json` (name
-> `One_For_All`, version `1.0.0`, `commands`/`skills`/`hooks` paths) and
-> `.claude-plugin/marketplace.json` before the commands above will work.
-
 (The `marketplace add` path is the project **folder**, which is unchanged; only the
 plugin name is now `One_For_All`.) Then restart/reload (`/reload-plugins`) so the
 commands and skill register. Verify with `/help` — you should see `/build-knowledge`,

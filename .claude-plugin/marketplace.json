@@ -1,0 +1,16 @@
+{
+  "name": "bug-bounty-knowledge-marketplace",
+  "owner": {
+    "name": "pentest"
+  },
+  "metadata": {
+    "description": "Local marketplace wrapper so the One_For_All plugin can be installed from this directory."
+  },
+  "plugins": [
+    {
+      "name": "One_For_All",
+      "source": "./",
+      "description": "Compounding knowledge-graph memory for bug bounty and security assessments. Build knowledge with /build-knowledge, reuse it with /induce-knowledge."
+    }
+  ]
+}
