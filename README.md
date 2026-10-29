@@ -8,12 +8,6 @@ and reused by every future session.
 Think of it as long-term memory that gets *smarter the more you hunt*, instead of
 starting from zero each engagement.
 
-![The One_For_All knowledge graph in the built-in web interface](docs/demo-graph.png)
-
-*The `/serve-knowledge` web interface: a real 52-node graph, with nodes clustered under
-their category hubs (techniques, tools, references, workflows, reporting, lessons, vuln
-classes). Drag nodes, click one to open it, click a legend chip to filter by type.*
-
 ## Commands
 
 | Command | When | What it does |
