@@ -8,3 +8,4 @@ claude_sessions
 # OS / editor cruft
 .DS_Store
 *.swp
+.claude-plugin/
