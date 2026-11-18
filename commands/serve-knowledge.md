@@ -18,7 +18,7 @@ Do this:
    `python3 "${CLAUDE_PLUGIN_ROOT}/web/kb.py" graphs`). Then pass that directory as
    `--kb`, and mention which graph you are serving in the final message.
    ```bash
-   KB="$HOME/.claude/bug-bounty-knowledge"   # or $HOME/.claude/knowledge-graphs/<name>
+   KB="${BBK_KB:-$HOME/.claude/bug-bounty-knowledge}"   # or $HOME/.claude/knowledge-graphs/<name>
    mkdir -p "$KB/nodes"
    if [ ! -f "$KB/INDEX.md" ] && [ -d "${CLAUDE_PLUGIN_ROOT:-/nonexistent}/knowledge-seed" ]; then
      cp -r "${CLAUDE_PLUGIN_ROOT}/knowledge-seed/." "$KB/"
@@ -38,7 +38,7 @@ Do this:
 
 4. **Start the server in the background** (it is a dependency-free stdlib server):
    ```bash
-   python3 "${CLAUDE_PLUGIN_ROOT}/web/server.py" --kb "$HOME/.claude/bug-bounty-knowledge" \
+   python3 "${CLAUDE_PLUGIN_ROOT}/web/server.py" --kb "$KB" \
      --port <PORT> --host <HOST> [--token <TOKEN>]
    ```
    Run it with `run_in_background`. If the port is already in use, pick the next free

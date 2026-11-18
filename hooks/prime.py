@@ -18,10 +18,11 @@ def main():
     try:
         plugin_root = os.environ.get("CLAUDE_PLUGIN_ROOT") or \
             os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-        kb = os.environ.get("BBK_KB") or os.path.expanduser("~/.claude/bug-bounty-knowledge")
-        nodes_dir = os.path.join(kb, "nodes")
         kbpy = os.path.join(plugin_root, "web", "kb.py")
-        if not os.path.isdir(nodes_dir) or not os.path.isfile(kbpy):
+        sys.path.insert(0, os.path.join(plugin_root, "web"))
+        import kb as kbmod   # owns graph paths (incl. BBK_KB), so hook and CLI agree
+        nodes_dir = kbmod.nodes_dir(kbmod.DEFAULT_KB)
+        if not os.path.isdir(nodes_dir):
             return 0
 
         # count files only: parsing every node on every session start is wasted work
@@ -29,9 +30,7 @@ def main():
         if enabled <= 0:
             return 0
         others = ""
-        try:
-            sys.path.insert(0, os.path.join(plugin_root, "web"))
-            import kb as kbmod
+        try:   # the "other graphs" hint is optional; never lose the main pointer over it
             extra = [n for n, _ in kbmod.all_graphs() if n != "default"]
             if extra:
                 others = (" Other graphs available: " + ", ".join(extra)

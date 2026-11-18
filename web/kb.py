@@ -21,6 +21,7 @@ Usage:
   python3 kb.py use <slug> [--n K]      Manually bump a node's usage counter.
   python3 kb.py pin <slug> [--off]      Pin (or unpin) a node to force it to the top.
   python3 kb.py stats                   Totals + the current top of the priority graph.
+  python3 kb.py reindex                 Rebuild INDEX.md from the nodes (run after writing nodes).
 
 --kb defaults to ~/.claude/bug-bounty-knowledge.
 """
@@ -31,6 +32,7 @@ import math
 import os
 import re
 import sys
+import tempfile
 
 SLUG_RE = re.compile(r"^[a-z0-9][a-z0-9-]*$")
 # Graph names are directory names, so underscores are fine too (node slugs stay kebab-case).
@@ -94,6 +96,41 @@ def update_frontmatter(raw, updates):
         else:
             lines.append(f"{key}: {val}")
     return head + "\n".join(lines) + "\n" + close + body
+
+
+# ---- node store: every node write goes through write_text ----
+def read_text(path):
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            return fh.read()
+    except FileNotFoundError:
+        return None
+
+
+def write_text(path, text):
+    """Atomic: write a temp file in the same dir, then replace. No truncated files."""
+    if not text.endswith("\n"):
+        text += "\n"
+    d = os.path.dirname(os.path.abspath(path))
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".tmp-", suffix=".tmp")   # not .md: never listed as a node
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        if os.path.exists(tmp):
+            os.unlink(tmp)
+        raise
+
+
+def set_meta(path, updates):
+    """Update frontmatter keys of one node file atomically. Returns the new raw text."""
+    raw = read_text(path)
+    if raw is None:
+        raise FileNotFoundError(path)
+    raw = update_frontmatter(raw, updates)
+    write_text(path, raw)
+    return raw
 
 
 # ---- scoring ----
@@ -161,7 +198,8 @@ def nodes_dir(kb):
 
 
 GRAPHS_ROOT = os.path.expanduser("~/.claude/knowledge-graphs")
-DEFAULT_KB = os.path.expanduser("~/.claude/bug-bounty-knowledge")
+DEFAULT_KB = os.path.abspath(os.path.expanduser(
+    os.environ.get("BBK_KB") or "~/.claude/bug-bounty-knowledge"))
 
 
 def resolve_graph(name):
@@ -180,7 +218,8 @@ def roots(a):
     """[(graph_name, dir)] this invocation addresses. --kb wins; --graph takes a list."""
     if getattr(a, "kb", None):
         p = os.path.abspath(os.path.expanduser(a.kb))
-        return [(os.path.basename(p) or "kb", p)]
+        known = [n for n, d in all_graphs() if os.path.realpath(d) == os.path.realpath(p)]
+        return [(known[0] if known else os.path.basename(p) or "kb", p)]
     names = [x.strip() for x in (getattr(a, "graph", None) or "default").split(",") if x.strip()]
     return [(n, resolve_graph(n)) for n in (names or ["default"])]
 
@@ -237,8 +276,9 @@ def load_nodes(kb, graph="default"):
         if not name.endswith(".md"):
             continue
         slug = name[:-3]
-        with open(os.path.join(nd, name), "r", encoding="utf-8") as fh:
-            raw = fh.read()
+        raw = read_text(os.path.join(nd, name))
+        if raw is None:   # deleted between listdir and read
+            continue
         meta, body = parse_frontmatter(raw)
         out.append({
             "slug": slug, "meta": meta, "body": body, "raw": raw,
@@ -255,6 +295,72 @@ def load_many(rs):
     for name, p in rs:
         out += load_nodes(p, name)
     return out
+
+
+def graph_node(n):
+    """A loaded node as the graph view and INDEX see it."""
+    m = n["meta"]
+    return {
+        "id": n["slug"],
+        "title": m.get("title", n["slug"]),
+        "type": m.get("type", "technique"),
+        "tags": m.get("tags", []) or [],
+        "vuln_class": m.get("vuln_class", []) or [],
+        "confidence": m.get("confidence", "low"),
+        "reinforced": _int(m.get("reinforced", 0)),
+        "related": [r for r in (m.get("related", []) or []) if r],
+        "summary": n["summary"],
+        "enabled": n["enabled"],
+        "created": str(m.get("created", "")),
+        "updated": str(m.get("updated", "")),
+    }
+
+
+# type -> INDEX heading, in INDEX order. Mirrors the knowledge-graph skill schema.
+TYPE_ORDER = ["technique", "tool", "reference", "lesson", "workflow", "reporting", "vuln-class"]
+TYPE_HEADING = {
+    "technique": "Techniques",
+    "tool": "Tools",
+    "reference": "References",
+    "lesson": "Lessons",
+    "workflow": "Workflows",
+    "reporting": "Reporting",
+    "vuln-class": "Vuln Classes (hubs)",
+}
+
+
+def reindex(kb, name):
+    """Rewrite <kb>/INDEX.md from the current nodes. The one place the INDEX format lives."""
+    nodes = [graph_node(n) for n in load_nodes(kb, name)]
+    by_type = {t: [] for t in TYPE_ORDER}
+    for n in nodes:
+        by_type.setdefault(n["type"], []).append(n)
+    lines = [f"# Knowledge Graph: {name} — Index", "",
+             f"_Last updated: {datetime.date.today().isoformat()} · {len(nodes)} nodes_", "",
+             "This is the hub of the compounding knowledge graph. Each entry links to a node in",
+             "`nodes/`. Grow it with `/build-knowledge`; load it with `/induce-knowledge`.", ""]
+    # Standard types first, then any non-standard type so no node is ever dropped.
+    extra_types = sorted(k for k in by_type if k not in TYPE_ORDER)
+    for t in TYPE_ORDER + extra_types:
+        group = sorted(by_type.get(t, []), key=lambda x: str(x["title"]).lower())
+        if not group:
+            continue
+        lines.append(f"## {TYPE_HEADING.get(t, t.replace('-', ' ').title())}")
+        for n in group:
+            summ = n["summary"] or n["title"]
+            tail = "" if n["enabled"] else " _(disabled)_"
+            lines.append(f"- [[{n['id']}]] — {summ} ({n['confidence']} · {n['reinforced']}){tail}")
+        lines.append("")
+    lines.append("## Link map")
+    ids = {x["id"] for x in nodes}
+    for n in sorted(nodes, key=lambda x: x["id"]):
+        rels = [r for r in n["related"] if r in ids]
+        if rels:
+            lines.append(f"- {n['id']} → {', '.join(rels)}")
+    lines.append("")
+    lines.append("_Format per entry: `[[slug]] — summary (confidence · reinforced-count)`._")
+    write_text(os.path.join(os.path.abspath(os.path.expanduser(kb)), "INDEX.md"), "\n".join(lines))
+    return len(nodes)
 
 
 def ref(n, multi):
@@ -338,13 +444,9 @@ def cmd_query(a):
 
 
 def _bump_uses(p, n=1):
-    with open(p, "r", encoding="utf-8") as fh:
-        raw = fh.read()
-    meta, _ = parse_frontmatter(raw)
+    meta, _ = parse_frontmatter(read_text(p))
     new = _int(meta.get("uses", 0)) + n
-    raw = update_frontmatter(raw, {"uses": str(new)})
-    with open(p, "w", encoding="utf-8") as fh:
-        fh.write(raw if raw.endswith("\n") else raw + "\n")
+    set_meta(p, {"uses": str(new)})
     return new
 
 
@@ -387,12 +489,7 @@ def cmd_pin(a):
     if not hit:
         print(f"error: not found: {a.slug}", file=sys.stderr)
         return 1
-    fp = hit[3]
-    with open(fp, "r", encoding="utf-8") as fh:
-        raw = fh.read()
-    raw = update_frontmatter(raw, {"pin": "false" if a.off else "true"})
-    with open(fp, "w", encoding="utf-8") as fh:
-        fh.write(raw if raw.endswith("\n") else raw + "\n")
+    set_meta(hit[3], {"pin": "false" if a.off else "true"})
     print(f"{hit[0]}:{hit[2]}: {'unpinned' if a.off else 'pinned ★'}")
 
 
@@ -410,6 +507,14 @@ def cmd_stats(a):
     print("top of the priority graph:")
     for n in en[:5]:
         print("  " + compact_line(n, multi))
+
+
+def cmd_reindex(a):
+    for name, p in roots(a):
+        if not os.path.isdir(nodes_dir(p)):
+            print(f"error: no such graph: {name}", file=sys.stderr)
+            return 1
+        print(f"{name}: INDEX.md rebuilt ({reindex(p, name)} node(s))")
 
 
 def cmd_graphs(a):
@@ -439,7 +544,10 @@ def rename_graph(old, new):
     if os.path.dirname(os.path.realpath(src)) != os.path.realpath(GRAPHS_ROOT):
         return False, "refusing to rename a directory outside the graphs root"
     os.rename(src, dst)
-    # INDEX.md is rewritten (with the graph name) on the next reindex; JOURNAL.md is not.
+    try:
+        reindex(dst, new)   # INDEX.md carries the graph name
+    except Exception:
+        pass                # the rename already happened; `kb.py reindex` can rebuild INDEX later
     p = os.path.join(dst, "JOURNAL.md")
     if os.path.isfile(p):
         with open(p, encoding="utf-8") as fh:
@@ -475,10 +583,6 @@ def cmd_delete(a):
     if not os.path.isdir(p):
         print(f"error: no such graph: {a.name}", file=sys.stderr)
         return 1
-    # never remove anything that is not a direct child of the graphs root
-    if os.path.dirname(os.path.realpath(p)) != os.path.realpath(GRAPHS_ROOT):
-        print("error: refusing to delete a directory outside the graphs root", file=sys.stderr)
-        return 1
     n = len(load_nodes(p, a.name))
     if a.yes:
         pass                                  # explicit non-interactive confirmation
@@ -491,9 +595,20 @@ def cmd_delete(a):
         print(f"error: refusing to delete '{a.name}' ({n} node(s)) without confirmation — "
               f"re-run with --yes, or run it interactively", file=sys.stderr)
         return 1
-    import shutil
-    shutil.rmtree(os.path.realpath(p))
+    n = remove_graph(p)
     print(f"deleted graph '{a.name}' ({n} node(s) removed) from {p}")
+
+
+def remove_graph(p):
+    """Delete a graph directory; returns how many nodes it held. Raises ValueError for
+    anything that is not a direct child of the graphs root (so never 'default')."""
+    rp = os.path.realpath(p)
+    if os.path.dirname(rp) != os.path.realpath(GRAPHS_ROOT):
+        raise ValueError("refusing to delete a directory outside the graphs root")
+    n = len(load_nodes(rp))
+    import shutil
+    shutil.rmtree(rp)
+    return n
 
 
 def create_graph(name, seed=False):
@@ -545,6 +660,7 @@ def main():
     p = sub.add_parser("pin"); p.add_argument("slug"); p.add_argument("--off", action="store_true"); p.set_defaults(fn=cmd_pin)
     s = sub.add_parser("stats"); s.set_defaults(fn=cmd_stats)
     gl = sub.add_parser("graphs"); gl.set_defaults(fn=cmd_graphs)
+    ri = sub.add_parser("reindex"); ri.set_defaults(fn=cmd_reindex)
     dl = sub.add_parser("delete"); dl.add_argument("name"); dl.add_argument("--yes", action="store_true",
         help="confirm non-interactively (required when stdin is not a TTY)"); dl.set_defaults(fn=cmd_delete)
     rn = sub.add_parser("rename"); rn.add_argument("old"); rn.add_argument("new"); rn.set_defaults(fn=cmd_rename)
