@@ -55,6 +55,7 @@ python3 web/kb.py query "graphql idor auth"  # rank by relevance × priority
 python3 web/kb.py get idor-id-enumeration    # load the FULL node(s) you need (bumps uses)
 python3 web/kb.py pin broken-access-control  # force a node to the top
 python3 web/kb.py stats                       # totals + top of the priority graph
+python3 web/kb.py reindex                     # rebuild INDEX.md from the nodes
 ```
 
 `/induce-knowledge` runs `manifest` (+ a focused `query`) to prime; during the task the

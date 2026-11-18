@@ -33,7 +33,7 @@ The plugin ships starter content in `${CLAUDE_PLUGIN_ROOT}/knowledge-seed/`.
 Resolve the KB path and seed it on first use:
 
 ```bash
-KB="$HOME/.claude/bug-bounty-knowledge"
+KB="${BBK_KB:-$HOME/.claude/bug-bounty-knowledge}"
 mkdir -p "$KB/nodes"
 # Seed only when the live store is empty; the guard makes this safe to re-run.
 if [ ! -f "$KB/INDEX.md" ] && [ -d "${CLAUDE_PLUGIN_ROOT:-/nonexistent}/knowledge-seed" ]; then
@@ -188,8 +188,8 @@ graph so knowledge compounds instead of duplicating.
 4. **Link the graph.** For every created/updated node, add relevant slugs to
    `related:` and `[[wikilinks]]` in prose. Add the reciprocal link on the other
    node too. Attach new techniques to their `vuln-class` hub node.
-5. **Update `INDEX.md`** — add new nodes under their type heading and refresh the
-   link map (section 6).
+5. **Rebuild `INDEX.md`** — run `python3 "$KBPY" reindex` (add `--graph <name>` for a
+   non-default graph). Do not hand-edit INDEX.md; it is generated (section 6).
 6. **Append to `JOURNAL.md`** a dated entry: what was added, what was reinforced,
    what was superseded (one or two lines each). This is the audit trail of how the
    graph grew.
@@ -227,8 +227,8 @@ task doesn't need.
 
 ## 6. INDEX.md format
 
-`INDEX.md` is the graph hub. Keep it regenerated/maintained so it always reflects
-`nodes/`:
+`INDEX.md` is the graph hub, generated from `nodes/` by `kb.py reindex` (the web UI
+runs the same code after every edit). Never edit it by hand. It looks like this:
 
 ```markdown
 # Knowledge Graph: <name> — Index
@@ -273,7 +273,7 @@ _Last updated: <date> · <N> nodes_
 
 As the graph grows, inducing everything is wasteful. `${CLAUDE_PLUGIN_ROOT}/web/kb.py`
 (stdlib-only, no server needed) ranks knowledge by a **priority score** and loads only
-what a task needs. Set `KB="$HOME/.claude/bug-bounty-knowledge"` and
+what a task needs. Set `KB="${BBK_KB:-$HOME/.claude/bug-bounty-knowledge}"` and
 `KBPY="${CLAUDE_PLUGIN_ROOT}/web/kb.py"` (fall back to the repo's `web/kb.py`).
 
 **Priority score** (higher = surface first), computed per node, not stored:
