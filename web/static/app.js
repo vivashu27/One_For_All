@@ -20,6 +20,9 @@ const state = {
   sort: "type",          // type | az | newest | updated
   typeFilter: null,      // Set of visible types in the graph (null = all)
   hideDisabled: false,   // also hide disabled nodes in the graph
+  pos: {},               // node/hub positions {id: [x, y]}, from the graph's layout.json
+  posFor: undefined,     // which graph `pos` belongs to
+  view: null,            // user zoom/pan view box; null = fit to the graph
 };
 const $ = (sel) => document.querySelector(sel);
 
@@ -103,7 +106,13 @@ function renderSidebar() {
 }
 
 /* ---------------------------- Graph ---------------------------- */
-let sim = { looping: false, alpha: 0, epoch: 0, nodes: [], byId: {}, els: {}, edgeEls: [] };
+// Static layout: nothing moves unless the user drags it or presses Tidy. Positions live in
+// state.pos ({id: [x, y]} in SVG units, saved per graph as layout.json) and the view box is
+// fitted to them, so resizing or filtering never reshuffles the graph.
+// what is drawn now: visible nodes + hubs, their SVG elements and edges; tween cancels a running Tidy glide
+let scene = { nodes: [], byId: {}, els: {}, edges: [], edgeEls: [], tween: 0 };
+const HUB = (t) => "__hub__" + t;
+const ROW = 28, COL_PAD = 40, HUB_TOP = 26, GAP_X = 56, GAP_Y = 44, MAX_LABEL = 48;
 function typeVisible(t) { return !state.typeFilter || state.typeFilter.has(t); }
 function toggleType(t) {
   if (!state.typeFilter) state.typeFilter = new Set(state.graph.nodes.map((n) => n.type));
@@ -114,69 +123,114 @@ function setAllTypes(on) { state.typeFilter = on ? null : new Set(); buildGraphD
 function renderLegend() {
   const counts = {};
   state.graph.nodes.forEach((n) => (counts[n.type] = (counts[n.type] || 0) + 1));
-  const types = [...new Set([...TYPE_ORDER, ...Object.keys(counts)])].filter((t) => counts[t]);
   const leg = $("#legend");
-  leg.innerHTML = types.map((t) => {
+  leg.innerHTML = graphTypes().map((t) => {
     const off = state.typeFilter && !state.typeFilter.has(t) ? " off" : "";
     return `<span class="leg${off}" data-type="${escapeHtml(t)}"><i style="background:${TYPE_COLORS[t] || "#888"}"></i>${TYPE_LABEL[t] || escapeHtml(t)}<span class="cnt">${counts[t]}</span></span>`;
   }).join("");
   leg.querySelectorAll(".leg").forEach((el) => (el.onclick = () => toggleType(el.dataset.type)));
 }
+function graphTypes() {
+  const present = new Set(state.graph.nodes.map((n) => n.type));
+  return [...new Set([...TYPE_ORDER, ...present])].filter((t) => present.has(t));
+}
+function hubLabel(t) {
+  return `${TYPE_LABEL[t] || t} (${state.graph.nodes.filter((n) => n.type === t).length})`;
+}
+function nodeRadius(n) { return n.hub ? 9 : 6 + Math.min(4, n.reinforced || 0); }
+function shortTitle(s) { s = String(s); return s.length > MAX_LABEL ? s.slice(0, MAX_LABEL - 1) + "…" : s; }
+const textW = (s, px) => String(s).length * px * 0.5;    // estimate: layout runs before any text is measured
+// label widths shared by Tidy and Fit; px must match .gnode text / .gnode.hub text in style.css
+const nodeLabelW = (n) => textW(shortTitle(n.title), 10.5);
+const hubLabelW = (t) => textW(hubLabel(t), 12.5);
+function canvasSize() { const svg = $("#graph"); return [svg.clientWidth || 800, svg.clientHeight || 600]; }
+
+/* Tidy layout: each type is a small tree (hub top-left, its nodes in columns below it, joined by
+   elbow connectors) and the trees flow into rows shaped like the canvas. */
+function tidyLayout(nodes, W, H) {
+  const byType = {};
+  nodes.forEach((n) => (byType[n.type] = byType[n.type] || []).push(n));
+  const maxRows = Math.max(6, Math.ceil(Math.sqrt(nodes.length) * 1.4));
+  const boxes = graphTypes().filter((t) => byType[t]).map((t) => {
+    const kids = byType[t].slice().sort((a, b) => a.title.localeCompare(b.title));
+    const rows = Math.min(kids.length, maxRows), cols = Math.ceil(kids.length / maxRows);
+    const colW = Math.max(...kids.map(nodeLabelW)) + 46;
+    const w = Math.max(COL_PAD + cols * colW, hubLabelW(t) + 24);
+    return { t, kids, rows, colW, w, h: HUB_TOP + (rows + 1) * ROW };
+  });
+  const area = boxes.reduce((s, b) => s + (b.w + GAP_X) * (b.h + GAP_Y), 0);
+  // small graphs spread across the canvas; large ones keep its aspect so the fit stays readable
+  const flowW = Math.max(W - 80, Math.sqrt(area * (W / H)), ...boxes.map((b) => b.w));
+  const pos = {};
+  let x = 0, y = 0, rowH = 0;
+  boxes.forEach((b) => {
+    if (x > 0 && x + b.w > flowW) { x = 0; y += rowH + GAP_Y; rowH = 0; }
+    const hx = x + 10, hy = y + HUB_TOP;
+    pos[HUB(b.t)] = [hx, hy];
+    b.kids.forEach((n, i) => {
+      pos[n.id] = [hx + COL_PAD + Math.floor(i / b.rows) * b.colW, hy + (i % b.rows + 1) * ROW];
+    });
+    x += b.w + GAP_X; rowH = Math.max(rowH, b.h);
+  });
+  return pos;
+}
+// Give a position to every node and hub that has none (first visit, or nodes an agent added),
+// next to its hub even if the user moved that hub, stepping down past any node already there.
+// Saved positions are never touched. Returns the ids it placed.
+function placeNodes(W, H) {
+  const tidy = tidyLayout(state.graph.nodes, W, H);
+  const added = [];
+  graphTypes().forEach((t) => { if (!state.pos[HUB(t)]) { state.pos[HUB(t)] = tidy[HUB(t)]; added.push(HUB(t)); } });
+  const taken = Object.values(state.pos);
+  const busy = (x, y) => taken.some((p) => Math.abs(p[0] - x) < ROW && Math.abs(p[1] - y) < ROW);
+  state.graph.nodes.forEach((n) => {
+    if (state.pos[n.id]) return;
+    const tidyHub = tidy[HUB(n.type)], hubPos = state.pos[HUB(n.type)];
+    const x = tidy[n.id][0] + hubPos[0] - tidyHub[0];
+    let y = tidy[n.id][1] + hubPos[1] - tidyHub[1];
+    for (let i = 0; i < 500 && busy(x, y); i++) y += ROW;
+    state.pos[n.id] = [x, y];
+    taken.push(state.pos[n.id]);
+    added.push(n.id);
+  });
+  return added;
+}
 function buildGraphDOM() {
   renderLegend();
+  scene.tween++;   // a rebuild supersedes any running Tidy animation
   const svg = $("#graph");
   svg.innerHTML = "";
-  sim.looping = false; sim.alpha = 0;  // stop any in-flight loop before rebuilding
-  const W = svg.clientWidth || 800, H = svg.clientHeight || 600;
-  sim.W = W;
+  const [W, H] = canvasSize();
+  const added = placeNodes(W, H);
   const visible = state.graph.nodes.filter(
     (n) => typeVisible(n.type) && (!state.hideDisabled || n.enabled !== false)
   );
   const visibleIds = new Set(visible.map((n) => n.id));
-  // One anchored parent hub per category, spaced on an ellipse, so the graph reads as
-  // labelled clusters instead of a single blob. Hubs are synthetic (not KB nodes).
-  const counts = {};
-  visible.forEach((n) => (counts[n.type] = (counts[n.type] || 0) + 1));
-  const hubTypes = [...new Set([...TYPE_ORDER, ...Object.keys(counts)])].filter((t) => counts[t]);
-  const RX = W * 0.33, RY = H * 0.30;
-  const hubs = hubTypes.map((t, i) => {
-    const a = (i / hubTypes.length) * Math.PI * 2 - Math.PI / 2;
-    return {
-      id: "__hub__" + t, hub: true, type: t, title: TYPE_LABEL[t] || t,
-      x: W / 2 + Math.cos(a) * RX, y: H / 2 + Math.sin(a) * RY,
-      vx: 0, vy: 0, fixed: true, r: 13,   // fixed → the tick leaves it anchored
-    };
+  const hubs = graphTypes().filter((t) => visible.some((n) => n.type === t))
+    .map((t) => ({ id: HUB(t), hub: true, type: t, title: hubLabel(t) }));
+  scene.nodes = visible.map((n) => ({ ...n })).concat(hubs);
+  scene.byId = {};
+  scene.nodes.forEach((n) => {
+    n.r = nodeRadius(n);
+    [n.x, n.y] = state.pos[n.id];
+    scene.byId[n.id] = n;
   });
-  const hubById = {}; hubs.forEach((h) => (hubById[h.type] = h));
-
-  sim.nodes = visible.map((n) => {
-    const h = hubById[n.type];
-    return {
-      ...n,
-      x: (h ? h.x : W / 2) + (Math.random() - 0.5) * 120,
-      y: (h ? h.y : H / 2) + (Math.random() - 0.5) * 120,
-      vx: 0, vy: 0, fixed: false, r: 7 + Math.min(10, (n.reinforced || 0) * 2),
-    };
-  }).concat(hubs);
-  sim.byId = {}; sim.nodes.forEach((n) => (sim.byId[n.id] = n));
   const gEdges = document.createElementNS(SVGNS, "g");
   const gNodes = document.createElementNS(SVGNS, "g");
   svg.appendChild(gEdges); svg.appendChild(gNodes);
-  // weak links between related nodes; strong spoke pinning each node to its own hub
-  sim.edges = state.graph.edges
+  scene.edges = state.graph.edges
     .filter((e) => visibleIds.has(e.source) && visibleIds.has(e.target))
-    .map((e) => ({ s: e.source, t: e.target, len: 110, k: 0.006, cls: "edge" }))
-    .concat(visible.filter((n) => hubById[n.type])
-      .map((n) => ({ s: n.id, t: hubById[n.type].id, len: 78, k: 0.055, cls: "edge spoke" })));
-  sim.edgeEls = sim.edges.map((e) => {
-    const ln = document.createElementNS(SVGNS, "line");
-    ln.setAttribute("class", e.cls);
-    ln.dataset.s = e.s; ln.dataset.t = e.t;
-    gEdges.appendChild(ln);
-    return ln;
+    .map((e) => ({ s: e.source, t: e.target, cls: "edge" }))
+    .concat(visible.map((n) => ({ s: n.id, t: HUB(n.type), cls: "edge spoke", spoke: true })));
+  scene.edgeEls = scene.edges.map((e) => {
+    const p = document.createElementNS(SVGNS, "path");
+    p.setAttribute("class", e.cls);
+    p.dataset.s = e.s; p.dataset.t = e.t;
+    gEdges.appendChild(p);
+    return p;
   });
-  sim.els = {}; sim.labels = {};
-  sim.nodes.forEach((n) => {
+  scene.els = {};
+  scene.nodes.forEach((n) => {
     const g = document.createElementNS(SVGNS, "g");
     g.setAttribute("class", "gnode" + (n.hub ? " hub" : "") + (n.enabled === false ? " off" : ""));
     g.dataset.id = n.id;
@@ -184,115 +238,169 @@ function buildGraphDOM() {
     c.setAttribute("r", n.r);
     c.setAttribute("fill", TYPE_COLORS[n.type] || "#888");
     const label = document.createElementNS(SVGNS, "text");
-    label.setAttribute("x", n.r + 4); label.setAttribute("y", 4);
-    label.textContent = n.hub ? `${n.title} (${counts[n.type]})` : n.title;
-    g.appendChild(c); g.appendChild(label);
+    if (n.hub) { label.setAttribute("x", -n.r); label.setAttribute("y", -n.r - 8); }
+    else { label.setAttribute("x", n.r + 6); label.setAttribute("y", 4); }
+    label.textContent = n.hub ? n.title : shortTitle(n.title);
     const tt = document.createElementNS(SVGNS, "title");
-    tt.textContent = n.hub ? `${n.title} — ${counts[n.type]} node(s)`
-      : `${n.title} [${n.type}] — ${n.confidence}, reinforced ${n.reinforced}` + (n.enabled === false ? " (disabled)" : "");
-    g.appendChild(tt);
+    tt.textContent = n.hub ? `${n.title}: drag to move the whole cluster`
+      : `${n.title} [${n.type}] · ${n.confidence}, reinforced ${n.reinforced}` + (n.enabled === false ? " (disabled)" : "");
+    g.appendChild(c); g.appendChild(label); g.appendChild(tt);
     gNodes.appendChild(g);
-    sim.els[n.id] = g;
-    sim.labels[n.id] = label;
-    if (!n.hub) {   // hubs are layout anchors: not draggable, not clickable
-      attachDrag(g, n);
+    scene.els[n.id] = g;
+    attachDrag(g, n);
+    if (!n.hub) {
       g.addEventListener("mouseenter", () => highlightNeighbors(n.id, true));
       g.addEventListener("mouseleave", () => highlightNeighbors(n.id, false));
     }
   });
-  startSim();
+  if (state.view) setViewBox(state.view); else fitView(W, H);
+  redraw();
+  const empty = $("#graph-empty");
+  empty.hidden = scene.nodes.length > 0;
+  empty.textContent = state.graph.nodes.length
+    ? "No nodes match the current filters. Choose All to show every type."
+    : "This graph has no nodes yet. Use + New node to add the first one.";
+  if (added.length) saveLayout(added);   // pin new arrivals so the next visit shows them in the same place
 }
-function startSim(reheat) {
-  // Reheatable, single-instance loop. `sim.alpha` is the energy; `sim.looping`
-  // guards against spawning a second rAF loop. Any interaction (drag) can reheat.
-  sim.alpha = Math.max(sim.alpha, reheat == null ? 1 : reheat);
-  if (sim.looping) return;
-  sim.looping = true;
-  const myEpoch = ++sim.epoch;  // a rebuild bumps the epoch; a superseded loop dies
+// View box around every position (hidden types included, so filtering never zooms), never
+// magnified past 1:1, centred in the canvas.
+function fitView(W, H) {
+  let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+  const grow = (p, right) => {
+    x0 = Math.min(x0, p[0] - 14); y0 = Math.min(y0, p[1] - 26);
+    x1 = Math.max(x1, p[0] + right); y1 = Math.max(y1, p[1] + 14);
+  };
+  state.graph.nodes.forEach((n) => grow(state.pos[n.id], 22 + nodeLabelW(n)));
+  graphTypes().forEach((t) => grow(state.pos[HUB(t)], hubLabelW(t)));
+  if (x0 === Infinity) { x0 = 0; y0 = 0; x1 = W; y1 = H; }
+  const pad = 28, bw = x1 - x0 + 2 * pad, bh = y1 - y0 + 2 * pad;
+  const s = Math.max(1, bw / W, bh / H);
+  const vw = W * s, vh = H * s;
+  setViewBox([x0 - pad - (vw - bw) / 2, y0 - pad - (vh - bh) / 2, vw, vh]);
+}
+function setViewBox(vb) { scene.vb = vb; $("#graph").setAttribute("viewBox", vb.join(" ")); }
+function fitGraph() {
+  state.view = null;
+  fitView(...canvasSize());
+}
+// Wheel zooms around the pointer; dragging empty canvas pans. Only the view moves, never a
+// node, and the view is kept (state.view) until Fit, Tidy or a graph switch re-fits it.
+function wireGraphView() {
   const svg = $("#graph");
-  const W = svg.clientWidth || 800, H = svg.clientHeight || 600;
-  function tick() {
-    if (myEpoch !== sim.epoch) return;  // a newer loop owns the graph now → stop
-    const ns = sim.nodes;
-    for (let i = 0; i < ns.length; i++) {
-      for (let j = i + 1; j < ns.length; j++) {
-        const a = ns[i], b = ns[j];
-        let dx = a.x - b.x, dy = a.y - b.y, d2 = dx * dx + dy * dy || 0.01, d = Math.sqrt(d2);
-        const rep = 5200 / d2, fx = (dx / d) * rep, fy = (dy / d) * rep;
-        a.vx += fx; a.vy += fy; b.vx -= fx; b.vy -= fy;
-      }
-    }
-    (sim.edges || []).forEach((e) => {
-      const a = sim.byId[e.s], b = sim.byId[e.t];
-      if (!a || !b) return;
-      let dx = b.x - a.x, dy = b.y - a.y, d = Math.sqrt(dx * dx + dy * dy) || 0.01;
-      const k = (d - e.len) * e.k, fx = (dx / d) * k, fy = (dy / d) * k;
-      a.vx += fx; a.vy += fy; b.vx -= fx; b.vy -= fy;
+  svg.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    const [x, y, w, h] = scene.vb, p = toSvgPoint(e);
+    const [W] = canvasSize();
+    const k = Math.min(Math.max(Math.exp(e.deltaY * 0.0015), (W * 0.25) / w), (W * 20) / w);
+    state.view = [p.x - (p.x - x) * k, p.y - (p.y - y) * k, w * k, h * k];
+    setViewBox(state.view);
+  }, { passive: false });
+  svg.addEventListener("pointerdown", (ev) => {
+    if (ev.button > 0 || (ev.target && ev.target.closest && ev.target.closest(".gnode"))) return;
+    const [x, y, w, h] = scene.vb, sx = ev.clientX, sy = ev.clientY;
+    const [W, H] = canvasSize(), s = Math.max(w / W, h / H);
+    trackPointer(svg, ev, "panning", (e) => {
+      state.view = [x - (e.clientX - sx) * s, y - (e.clientY - sy) * s, w, h];
+      setViewBox(state.view);
     });
-    ns.forEach((n) => {
-      if (n.fixed) { n.vx = n.vy = 0; return; }  // anchored hub, or pinned to cursor
-      // no center gravity: hub spokes do the positioning, keeping clusters apart
-      n.x += n.vx * sim.alpha * 0.4; n.y += n.vy * sim.alpha * 0.4;
-      n.x = Math.max(n.r + 6, Math.min(W - n.r - 6, n.x));
-      n.y = Math.max(n.r + 6, Math.min(H - 20, n.y));
-      n.vx *= 0.82; n.vy *= 0.82;
-    });
-    sim.alpha *= 0.992;
-    frame();
-    if (sim.alpha > 0.02) requestAnimationFrame(tick);
-    else sim.looping = false;  // settle; restartable via startSim(reheat)
-  }
-  requestAnimationFrame(tick);
+  });
 }
-function frame() {
-  sim.edgeEls.forEach((ln) => {
-    const a = sim.byId[ln.dataset.s], b = sim.byId[ln.dataset.t];
-    if (!a || !b) return;
-    ln.setAttribute("x1", a.x); ln.setAttribute("y1", a.y);
-    ln.setAttribute("x2", b.x); ln.setAttribute("y2", b.y);
-  });
-  sim.nodes.forEach((n) => {
-    sim.els[n.id].setAttribute("transform", `translate(${n.x},${n.y})`);
-    // nodes are clamped to the canvas but their labels are not: flip the text inward
-    // near the right edge so long titles stay readable instead of being cut off.
-    if (n.lw == null) {   // measured once per rebuild: titles vary a lot in length
-      const el = sim.labels[n.id];
-      n.lw = (el.getComputedTextLength ? el.getComputedTextLength() : 0) || el.textContent.length * 5.8;
-    }
-    const flip = n.x + n.r + 8 + n.lw > (sim.W || 800);
-    if (flip !== n.flipped) {
-      const t = sim.labels[n.id];
-      t.setAttribute("x", flip ? -(n.r + 4) : n.r + 4);
-      t.setAttribute("text-anchor", flip ? "end" : "start");
-      n.flipped = flip;
-    }
-  });
+// Follow one pointer on el until it is released: cls marks el meanwhile, onUp (optional) runs last.
+function trackPointer(el, ev, cls, onMove, onUp) {
+  try { el.setPointerCapture(ev.pointerId); } catch (_) {}
+  el.classList.add(cls);
+  const end = (e) => {
+    ["pointermove", "pointerup", "pointercancel"].forEach((t, i) => el.removeEventListener(t, i ? end : onMove));
+    try { el.releasePointerCapture(ev.pointerId); } catch (_) {}
+    el.classList.remove(cls);
+    if (onUp) onUp(e);
+  };
+  el.addEventListener("pointermove", onMove);
+  el.addEventListener("pointerup", end);
+  el.addEventListener("pointercancel", end);
+}
+function edgePath(e) {
+  const a = scene.byId[e.s], b = scene.byId[e.t];
+  if (e.spoke) {   // elbow: out of the hub, down the column's trunk, into the node
+    return `M${b.x + b.r},${b.y}H${a.x - 16}V${a.y}H${a.x - a.r}`;
+  }
+  // related link: a shallow arc, so links read apart from the rectilinear tree
+  const mx = (a.x + b.x) / 2, my = (a.y + b.y) / 2, dx = b.x - a.x, dy = b.y - a.y;
+  return `M${a.x},${a.y}Q${mx - dy * 0.18},${my + dx * 0.18} ${b.x},${b.y}`;
+}
+function redraw() {
+  scene.edgeEls.forEach((el, i) => el.setAttribute("d", edgePath(scene.edges[i])));
+  scene.nodes.forEach((n) => scene.els[n.id].setAttribute("transform", `translate(${n.x},${n.y})`));
+}
+function toSvgPoint(ev) {
+  const svg = $("#graph");
+  if (svg.getScreenCTM && svg.createSVGPoint) {
+    const p = svg.createSVGPoint(); p.x = ev.clientX; p.y = ev.clientY;
+    return p.matrixTransform(svg.getScreenCTM().inverse());
+  }
+  return { x: ev.clientX, y: ev.clientY };   // stub DOM in tests: 1:1
+}
+function settleTween() {   // jump a running Tidy animation to its end before the user grabs a node
+  scene.tween++;
+  scene.nodes.forEach((n) => { [n.x, n.y] = state.pos[n.id]; });
 }
 function attachDrag(g, n) {
-  let moved = false, startX, startY;
   g.addEventListener("pointerdown", (ev) => {
-    ev.preventDefault(); moved = false; startX = ev.clientX; startY = ev.clientY;
-    n.fixed = true;
-    try { g.setPointerCapture(ev.pointerId); } catch (_) {}
-    startSim(0.5);  // wake the sim so the drag is live even if the graph had settled
-    const svg = $("#graph");
-    const onMove = (e) => {
-      const r = svg.getBoundingClientRect();
-      n.x = e.clientX - r.left; n.y = e.clientY - r.top; n.vx = n.vy = 0;
-      if (Math.abs(e.clientX - startX) + Math.abs(e.clientY - startY) > 4) moved = true;
-      frame();                               // immediate, zero-latency repaint
-      if (!sim.looping) startSim(0.3);        // re-ignite if it cooled mid-drag
-    };
-    const onUp = (e) => {
-      g.removeEventListener("pointermove", onMove);
-      g.removeEventListener("pointerup", onUp);
-      try { g.releasePointerCapture(ev.pointerId); } catch (_) {}
-      n.fixed = false; n.vx = n.vy = 0;
-      if (!moved) openNode(n.id);
-    };
-    g.addEventListener("pointermove", onMove);
-    g.addEventListener("pointerup", onUp);
+    if (ev.button > 0) return;
+    ev.preventDefault();
+    settleTween();
+    // a hub carries its whole cluster, hidden nodes included, so the cluster keeps its shape
+    const group = n.hub ? [n.id, ...state.graph.nodes.filter((m) => m.type === n.type).map((m) => m.id)] : [n.id];
+    const from = group.map((id) => state.pos[id].slice());
+    const start = toSvgPoint(ev), sx = ev.clientX, sy = ev.clientY;
+    let moved = false;
+    trackPointer(g, ev, "dragging", (e) => {
+      if (!moved && Math.abs(e.clientX - sx) + Math.abs(e.clientY - sy) < 4) return;
+      moved = true;
+      const p = toSvgPoint(e), dx = p.x - start.x, dy = p.y - start.y;
+      group.forEach((id, i) => {
+        state.pos[id] = [from[i][0] + dx, from[i][1] + dy];
+        const s = scene.byId[id];
+        if (s) [s.x, s.y] = state.pos[id];
+      });
+      redraw();
+    }, () => {
+      if (moved) saveLayout(group);
+      else if (!n.hub) openNode(n.id);
+    });
   });
+}
+// Send only the ids that moved; the server merges them, so two tabs don't overwrite each other.
+async function saveLayout(ids) {
+  const positions = {};
+  ids.forEach((id) => (positions[id] = state.pos[id]));
+  try { await api("PUT", "/layout", { positions }); }
+  catch (e) { status("Couldn't save the layout: " + e.message, "err"); }
+}
+function tidyGraph() {
+  if (!confirm("Tidy re-arranges every node and replaces the positions you've set. Continue?")) return;
+  const target = tidyLayout(state.graph.nodes, ...canvasSize());
+  const from = {};
+  Object.keys(target).forEach((id) => (from[id] = (state.pos[id] || target[id]).slice()));
+  Object.assign(state.pos, target);
+  state.view = null;
+  buildGraphDOM();   // fits the view to the tidy positions
+  saveLayout(Object.keys(target));
+  status("Graph tidied.", "ok");
+  if (typeof matchMedia === "function" && matchMedia("(prefers-reduced-motion: reduce)").matches) return;
+  // glide from the old arrangement so the eye can follow each node to its new place
+  const my = scene.tween, t0 = performance.now(), DUR = 320;
+  const step = (now) => {
+    if (my !== scene.tween) return;
+    const k = Math.min(1, (now - t0) / DUR), e = k >= 1 ? 1 : 1 - Math.pow(2, -10 * k);
+    scene.nodes.forEach((n) => {
+      const a = from[n.id], b = target[n.id];
+      n.x = a[0] + (b[0] - a[0]) * e; n.y = a[1] + (b[1] - a[1]) * e;
+    });
+    redraw();
+    if (k < 1) requestAnimationFrame(step);
+  };
+  requestAnimationFrame(step);
 }
 function highlightNeighbors(id, on) {
   const nb = new Set([id]);
@@ -300,8 +408,8 @@ function highlightNeighbors(id, on) {
     if (e.source === id) nb.add(e.target);
     if (e.target === id) nb.add(e.source);
   });
-  sim.nodes.forEach((n) => sim.els[n.id].classList.toggle("dim", on && !nb.has(n.id)));
-  sim.edgeEls.forEach((ln) => {
+  scene.nodes.forEach((n) => scene.els[n.id].classList.toggle("dim", on && !n.hub && !nb.has(n.id)));
+  scene.edgeEls.forEach((ln) => {
     const touch = ln.dataset.s === id || ln.dataset.t === id;
     ln.classList.toggle("hl", on && touch);
   });
@@ -456,7 +564,14 @@ async function loadJournal() {
 
 /* --------------------------- Refresh --------------------------- */
 async function refreshGraph() {
-  state.graph = await api("GET", "/graph");
+  const name = state.graphName;
+  // positions are fetched once per graph; after that the in-memory copy is the truth
+  const [graph, layout] = await Promise.all([
+    api("GET", "/graph"),
+    state.posFor === name ? null : api("GET", "/layout").catch(() => ({ positions: {} })),
+  ]);
+  state.graph = graph;
+  if (layout) { state.pos = layout.positions || {}; state.posFor = name; state.view = null; }
   renderSidebar();
   if ($("#view-graph").classList.contains("active")) buildGraphDOM();
 }
@@ -546,8 +661,9 @@ async function doImport(file) {
     const parsed = JSON.parse(text);
     const nodes = parsed.nodes || [];
     if (!confirm(`Import ${nodes.length} node(s)? Existing nodes with the same slug will be overwritten.`)) return;
-    const r = await api("POST", "/import", { nodes });
+    const r = await api("POST", "/import", parsed.layout ? { nodes, layout: parsed.layout } : { nodes });
     status(`Imported ${r.written.length}, skipped ${r.skipped.length}.`, "ok");
+    state.posFor = undefined;   // re-read layout.json so imported positions aren't re-placed and overwritten
     await refreshGraph();
   } catch (e) { status("Import failed: " + e.message, "err"); }
 }
@@ -564,6 +680,9 @@ function wireEvents() {
   $("#flt-all").onclick = () => setAllTypes(true);
   $("#flt-none").onclick = () => setAllTypes(false);
   $("#flt-hide-disabled").addEventListener("change", (e) => { state.hideDisabled = e.target.checked; buildGraphDOM(); });
+  $("#btn-tidy").onclick = tidyGraph;
+  $("#btn-fit").onclick = fitGraph;
+  wireGraphView();
   $("#btn-edit").onclick = enterEdit;
   $("#btn-cancel").onclick = exitEdit;
   $("#btn-save").onclick = saveNode;

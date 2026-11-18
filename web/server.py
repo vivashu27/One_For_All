@@ -113,10 +113,58 @@ def regenerate_index(kb):
     kblib.reindex(kb, graph_name_for(kb))
 
 
+# a node slug, or a type hub: types are free-form frontmatter and hub keys are never used as paths
+LAYOUT_KEY = re.compile(r"^__hub__[^\x00-\x1f]{1,80}$|" + SLUG_RE.pattern)
+MAX_LAYOUT = 20000
+
+
+def read_layout(kb):
+    """Saved node positions for the web UI's graph view: {id: [x, y]}. Missing or corrupt → {}."""
+    try:
+        d = json.loads(read_text(os.path.join(kb, "layout.json")) or "{}")
+        stored = d["positions"] if isinstance(d.get("positions"), dict) else {}
+    except (ValueError, AttributeError):
+        return {}
+    out = {}
+    for k, v in stored.items():   # skip hand-edited bad entries, keep the rest
+        try:
+            out.update(clean_layout({k: v}))
+        except ValueError:
+            pass
+    return out
+
+
+def clean_layout(positions):
+    """Validate a client-sent {id: [x, y]} map; raises ValueError on anything else."""
+    if not isinstance(positions, dict) or len(positions) > MAX_LAYOUT:
+        raise ValueError("'positions' must be an object of id -> [x, y]")
+    out = {}
+    for k, v in positions.items():
+        if not isinstance(k, str) or not LAYOUT_KEY.fullmatch(k):
+            raise ValueError(f"invalid layout id: {str(k)[:40]}")
+        if (not isinstance(v, list) or len(v) != 2
+                or not all(isinstance(c, (int, float)) and not isinstance(c, bool)
+                           and abs(c) < 1e7 for c in v)):   # abs() < 1e7 also rejects inf/nan
+            raise ValueError(f"position for {k} must be [x, y] numbers")
+        out[k] = [round(v[0], 1), round(v[1], 1)]
+    return out
+
+
+def merge_layout(kb, positions):
+    """Merge cleaned positions into layout.json, so a save only touches the ids it sends (two tabs
+    don't wipe each other), and drop ids whose node file is gone. Returns the stored count."""
+    merged = {k: v for k, v in {**read_layout(kb), **positions}.items()
+              if k.startswith("__hub__") or os.path.isfile(node_path(kb, k))}
+    if len(merged) > MAX_LAYOUT:
+        raise ValueError("layout has too many positions")
+    write_text(os.path.join(kb, "layout.json"), json.dumps({"positions": merged}))
+    return len(merged)
+
+
 def export_zip(kb, name):
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-        for fname in ("INDEX.md", "JOURNAL.md"):
+        for fname in ("INDEX.md", "JOURNAL.md", "layout.json"):
             txt = read_text(os.path.join(kb, fname))
             if txt is not None:
                 zf.writestr(f"{name}/{fname}", txt)
@@ -131,6 +179,7 @@ def export_json(kb, name):
         "generated": datetime.datetime.now().isoformat(timespec="seconds"),
         "graph": name,
         "nodes": [{"slug": n["slug"], "raw": n["raw"]} for n in kblib.load_nodes(kb)],
+        "layout": read_layout(kb),
     }
 
 
@@ -240,6 +289,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"graphs": rows, "current": cur})
             if path == "/api/graph":
                 return self._json(build_graph(kb))
+            if path == "/api/layout":
+                return self._json({"positions": read_layout(kb)})
             if path == "/api/journal":
                 return self._json({"text": read_text(os.path.join(kb, "JOURNAL.md")) or ""})
             if path == "/api/export":
@@ -340,6 +391,8 @@ class Handler(BaseHTTPRequestHandler):
             nodes = d.get("nodes", [])
             if not isinstance(nodes, list):
                 return self._json({"error": "'nodes' must be a list"}, 400)
+            # validate before writing any node, so a bad layout can't leave a half-done import
+            layout = clean_layout(d["layout"]) if "layout" in d else None
             written, skipped = [], []
             for item in nodes:
                 if not isinstance(item, dict):
@@ -355,6 +408,8 @@ class Handler(BaseHTTPRequestHandler):
                     written.append(slug)
                 except ValueError:
                     skipped.append(slug)
+            if layout:
+                merge_layout(kb, layout)
             regenerate_index(kb)
             return self._json({"ok": True, "written": written, "skipped": skipped})
         return self._json({"error": "unknown endpoint"}, 404)
@@ -377,6 +432,8 @@ class Handler(BaseHTTPRequestHandler):
             kb = self._kb(query)
         except KeyError as e:
             return self._json({"error": f"unknown graph: {e.args[0]}"}, 400)
+        if path == "/api/layout":   # ValueError from clean_layout → 400 in do_PUT
+            return self._json({"ok": True, "saved": merge_layout(kb, clean_layout(self._body_json().get("positions")))})
         m = re.match(r"^/api/node/([^/]+)$", path)
         if not m:
             return self._json({"error": "unknown endpoint"}, 404)

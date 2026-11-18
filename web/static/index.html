@@ -74,8 +74,15 @@
           <label class="chk" title="Also hide nodes you've disabled"><input type="checkbox" id="flt-hide-disabled"> Hide disabled</label>
         </div>
       </div>
-      <svg id="graph" xmlns="http://www.w3.org/2000/svg"></svg>
-      <div class="graph-hint">Drag nodes · click to open · click a legend chip to filter by type</div>
+      <div class="canvas">
+        <svg id="graph" xmlns="http://www.w3.org/2000/svg"></svg>
+        <div class="canvas-tools">
+          <button id="btn-fit" class="btn" title="Zoom to show the whole graph">Fit</button>
+          <button id="btn-tidy" class="btn" title="Re-arrange every cluster into a clean tree and save it">Tidy layout</button>
+        </div>
+        <div id="graph-empty" class="graph-empty" hidden></div>
+        <div class="graph-hint">Drag a node to move it · drag a type hub to move its cluster · scroll to zoom · drag empty space to pan</div>
+      </div>
     </section>
 
     <!-- NODE -->
