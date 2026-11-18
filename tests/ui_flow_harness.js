@@ -4,7 +4,7 @@
 const fs = require("fs");
 const P = require("path").resolve(__dirname, "..", "web/static/app.js");
 let src = fs.readFileSync(P, "utf8").replace(/\n\s*init\(\);\s*$/, "\n");
-src += "\n;return { state, sim, init, switchGraph, deleteGraph, loadGraphs };";
+src += "\n;return { state, scene, init, switchGraph, deleteGraph, loadGraphs, doImport };";
 
 function mkEl(tag) {
   const L = {}, kids = [], cls = new Set();
@@ -45,8 +45,10 @@ let deleted = null;
 function jsonRes(obj) {
   return { ok: true, status: 200, headers: { get: () => "application/json" }, json: async () => obj, text: async () => "" };
 }
+const bodies = {};
 const fetch = async (url, opts = {}) => {
   calls.push((opts.method || "GET") + " " + url);
+  if (opts.body) bodies[new URL(url, "http://x").pathname] = JSON.parse(opts.body);
   const u = new URL(url, "http://x");
   const p = u.pathname, g = u.searchParams.get("graph");
   if (p === "/api/graphs") return jsonRes({ graphs: GRAPHS, current: "default" });
@@ -58,6 +60,7 @@ const fetch = async (url, opts = {}) => {
       edges: [], count: n });
   }
   if (p === "/api/journal") return jsonRes({ text: "# J" });
+  if (p === "/api/import") return jsonRes({ ok: true, written: ["a"], skipped: [] });
   if (p === "/api/graph" ) return jsonRes({});
   if (p.startsWith("/api/graph") && (opts.method === "DELETE")) { deleted = g; return jsonRes({ ok: true, deleted: g, nodes_removed: 3 }); }
   return jsonRes({ ok: true });
@@ -117,6 +120,14 @@ const flush = () => new Promise(r => setTimeout(r, 5));
   calls.length = 0; state.graphName = "web3"; promptReply = "wrong-name";
   await app.deleteGraph(); await flush();
   ck("mismatched confirmation aborts", !calls.some(c => c.startsWith("DELETE")));
+
+  // import from a JSON export sends its layout, then re-reads the layout so the restored
+  // positions win over freshly placed ones
+  calls.length = 0;
+  const file = { text: async () => JSON.stringify({ nodes: [{ slug: "a", raw: "---\n" }], layout: { a: [1, 2] } }) };
+  await app.doImport(file); await flush();
+  ck("import sends the export's layout", bodies["/api/import"]?.layout?.a?.[1] === 2);
+  ck("import re-reads the layout", calls.some(c => c.startsWith("GET") && c.includes("/api/layout")));
 
   let all = true;
   for (const [n, c] of out) { console.log(`  [${c ? "PASS" : "FAIL"}] ${n}`); all = all && c; }
