@@ -5,7 +5,7 @@ const TOKEN = new URLSearchParams(location.search).get("token") || "";
 const SVGNS = "http://www.w3.org/2000/svg";
 const TYPE_COLORS = {
   technique: "#46b4ff", tool: "#c084fc", reference: "#ffd166", lesson: "#3fd07f",
-  workflow: "#ff9f68", reporting: "#f472b6", "vuln-class": "#ff6b6b",
+  workflow: "#ff9f68", reporting: "#f472b6", "vuln-class": "#ff6b6b", phase: "#9aa5b1",
 };
 const TYPE_LABEL = {
   technique: "Techniques", tool: "Tools", reference: "References", lesson: "Lessons",
@@ -20,6 +20,7 @@ const state = {
   sort: "type",          // type | az | newest | updated
   typeFilter: null,      // Set of visible types in the graph (null = all)
   hideDisabled: false,   // also hide disabled nodes in the graph
+  showPhases: false,     // overlay the virtual scope → … → report phase spine
   pos: {},               // node/hub positions {id: [x, y]}, from the graph's layout.json
   posFor: undefined,     // which graph `pos` belongs to
   view: null,            // user zoom/pan view box; null = fit to the graph
@@ -112,6 +113,19 @@ function renderSidebar() {
 // what is drawn now: visible nodes + hubs, their SVG elements and edges; tween cancels a running Tidy glide
 let scene = { nodes: [], byId: {}, els: {}, edges: [], edgeEls: [], tween: 0 };
 const HUB = (t) => "__hub__" + t;
+// Phase hubs are virtual: built from each node's `phase` list, never stored as nodes.
+const PHASES = ["scope", "recon", "rank", "hunt", "validate", "report", "all"];
+const PHUB = (p) => HUB("phase:" + p);
+function phaseHubs() {
+  if (!state.showPhases) return [];
+  const present = new Set(state.graph.nodes.flatMap((n) => n.phase || ["all"]));
+  return PHASES.filter((p) => present.has(p));
+}
+function placePhaseHubs() {   // a row above the graph unless the user dragged them somewhere
+  const ps = Object.values(state.pos);
+  const x0 = Math.min(0, ...ps.map((p) => p[0])), y0 = Math.min(0, ...ps.map((p) => p[1]));
+  phaseHubs().forEach((p, i) => { if (!state.pos[PHUB(p)]) state.pos[PHUB(p)] = [x0 + 10 + i * 150, y0 - 90]; });
+}
 const ROW = 28, COL_PAD = 40, HUB_TOP = 26, GAP_X = 56, GAP_Y = 44, MAX_LABEL = 48;
 function typeVisible(t) { return !state.typeFilter || state.typeFilter.has(t); }
 function toggleType(t) {
@@ -202,12 +216,15 @@ function buildGraphDOM() {
   svg.innerHTML = "";
   const [W, H] = canvasSize();
   const added = placeNodes(W, H);
+  placePhaseHubs();
   const visible = state.graph.nodes.filter(
     (n) => typeVisible(n.type) && (!state.hideDisabled || n.enabled !== false)
   );
   const visibleIds = new Set(visible.map((n) => n.id));
   const hubs = graphTypes().filter((t) => visible.some((n) => n.type === t))
-    .map((t) => ({ id: HUB(t), hub: true, type: t, title: hubLabel(t) }));
+    .map((t) => ({ id: HUB(t), hub: true, type: t, title: hubLabel(t) }))
+    .concat(phaseHubs().map((p) => ({ id: PHUB(p), hub: true, phaseHub: true, type: "phase",
+      title: `${p === "all" ? "All phases" : p} (${state.graph.nodes.filter((n) => (n.phase || ["all"]).includes(p)).length})` })));
   scene.nodes = visible.map((n) => ({ ...n })).concat(hubs);
   scene.byId = {};
   scene.nodes.forEach((n) => {
@@ -222,6 +239,11 @@ function buildGraphDOM() {
     .filter((e) => visibleIds.has(e.source) && visibleIds.has(e.target))
     .map((e) => ({ s: e.source, t: e.target, cls: "edge" }))
     .concat(visible.map((n) => ({ s: n.id, t: HUB(n.type), cls: "edge spoke", spoke: true })));
+  const ph = phaseHubs().filter((p) => p !== "all");
+  ph.slice(1).forEach((p, i) => scene.edges.push({ s: PHUB(ph[i]), t: PHUB(p), cls: "edge phase-spine" }));
+  visible.forEach((n) => (n.phase || ["all"]).forEach((p) => {
+    if (scene.byId[PHUB(p)]) scene.edges.push({ s: n.id, t: PHUB(p), cls: "edge phase" });
+  }));
   scene.edgeEls = scene.edges.map((e) => {
     const p = document.createElementNS(SVGNS, "path");
     p.setAttribute("class", e.cls);
@@ -242,7 +264,7 @@ function buildGraphDOM() {
     else { label.setAttribute("x", n.r + 6); label.setAttribute("y", 4); }
     label.textContent = n.hub ? n.title : shortTitle(n.title);
     const tt = document.createElementNS(SVGNS, "title");
-    tt.textContent = n.hub ? `${n.title}: drag to move the whole cluster`
+    tt.textContent = n.phaseHub ? `Phase ${n.title}: drag to move` : n.hub ? `${n.title}: drag to move the whole cluster`
       : `${n.title} [${n.type}] · ${n.confidence}, reinforced ${n.reinforced}` + (n.enabled === false ? " (disabled)" : "");
     g.appendChild(c); g.appendChild(label); g.appendChild(tt);
     gNodes.appendChild(g);
@@ -272,6 +294,7 @@ function fitView(W, H) {
   };
   state.graph.nodes.forEach((n) => grow(state.pos[n.id], 22 + nodeLabelW(n)));
   graphTypes().forEach((t) => grow(state.pos[HUB(t)], hubLabelW(t)));
+  phaseHubs().forEach((p) => state.pos[PHUB(p)] && grow(state.pos[PHUB(p)], 100));
   if (x0 === Infinity) { x0 = 0; y0 = 0; x1 = W; y1 = H; }
   const pad = 28, bw = x1 - x0 + 2 * pad, bh = y1 - y0 + 2 * pad;
   const s = Math.max(1, bw / W, bh / H);
@@ -350,7 +373,7 @@ function attachDrag(g, n) {
     ev.preventDefault();
     settleTween();
     // a hub carries its whole cluster, hidden nodes included, so the cluster keeps its shape
-    const group = n.hub ? [n.id, ...state.graph.nodes.filter((m) => m.type === n.type).map((m) => m.id)] : [n.id];
+    const group = n.hub && !n.phaseHub ? [n.id, ...state.graph.nodes.filter((m) => m.type === n.type).map((m) => m.id)] : [n.id];
     const from = group.map((id) => state.pos[id].slice());
     const start = toSvgPoint(ev), sx = ev.clientX, sy = ev.clientY;
     let moved = false;
@@ -680,6 +703,7 @@ function wireEvents() {
   $("#flt-all").onclick = () => setAllTypes(true);
   $("#flt-none").onclick = () => setAllTypes(false);
   $("#flt-hide-disabled").addEventListener("change", (e) => { state.hideDisabled = e.target.checked; buildGraphDOM(); });
+  $("#flt-phases").addEventListener("change", (e) => { state.showPhases = e.target.checked; buildGraphDOM(); });
   $("#btn-tidy").onclick = tidyGraph;
   $("#btn-fit").onclick = fitGraph;
   wireGraphView();

@@ -67,6 +67,9 @@ try:
         ck("remove_graph refuses a dir outside the graphs root", False)
     except ValueError:
         ck("remove_graph refuses a dir outside the graphs root", os.path.isdir(DEF))
+    ck("extract_summary keeps a hard-wrapped summary paragraph whole",
+       kb.extract_summary("**Summary:** one\ntwo three\n\n## Next\nx") == "one two three"
+       and kb.extract_summary("**Summary:** one\n## Next") == "one")
 finally:
     shutil.rmtree(HOME, ignore_errors=True)
 

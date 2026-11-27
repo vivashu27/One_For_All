@@ -110,6 +110,30 @@ fail-safe (any error → no output, never blocks a session), and emits nothing w
 is empty. The `knowledge-graph` skill description is also scoped to trigger at the start
 of recon/hunting/reporting tasks, so the model loads it naturally.
 
+### Standing rules per project (opt-in)
+
+Create `.claude/one-for-all.json` in a project (any parent dir works too) to make the
+graph's rules **enforced**, not just available, for the whole session and every new one:
+
+```json
+{ "graphs": ["default"], "pin": ["extra-slug"], "disable": ["scanner-node-banned-here"] }
+```
+
+All keys are optional; an empty `{}` opts in. Put `{"rules": "global"}` in
+`~/.claude/one-for-all.json` to opt in everywhere. Then:
+
+| Hook | Injects |
+|---|---|
+| `SessionStart` (startup, resume, clear, compact) | rules for phases `all` + `scope`, the pipeline spine, the pointer note |
+| `SubagentStart` | rules + top-10 pointers for the agent's phase (`hooks/agent-phases.json`, editable) |
+| `UserPromptSubmit` | up to 3 strongly matching nodes not shown yet this session |
+| `PostToolUse` | one delegation nudge after 8 inline tool calls (while `coordinator-subagent-fanout` is enabled) |
+
+A rule is any node with `pin: true` or a `rule:` field; the text is worded as the user's
+own instruction and capped at ~1.5k tokens (a warning names what was cut). Tag nodes with
+`phase:` and browse with `kb.py manifest --phase recon`; the web view's **Phases** toggle
+overlays the scope → … → report spine.
+
 > The plugin is installed at **user scope**, so this pointer appears in every project's
 > sessions and self-suppresses for non-security work ("if this session is not
 > security-related, ignore this note"). To turn it off, remove the `"hooks"` key from
@@ -189,8 +213,9 @@ Bug_Bounty_Knowledge_Memory_builder/
 ├── skills/knowledge-graph/
 │   └── SKILL.md              # storage schema, dedup/merge, priority graph, recall
 ├── hooks/                    # auto-awareness
-│   ├── hooks.json            # SessionStart hook registration
-│   └── prime.py              # injects a tiny KB pointer into every session
+│   ├── hooks.json            # SessionStart/SubagentStart/UserPromptSubmit/PostToolUse
+│   ├── agent-phases.json     # subagent type → pipeline phase
+│   └── prime.py              # pointer note + standing rules, phase rules, recall, nudge
 ├── tests/                    # no framework: python3 + node. Run: ./tests/run.sh
 ├── web/                      # local web interface + retrieval CLI (dependency-free)
 │   ├── server.py             # stdlib HTTP server: JSON API + static files

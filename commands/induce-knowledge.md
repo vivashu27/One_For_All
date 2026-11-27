@@ -11,6 +11,12 @@ counter — that is expected and desirable).
 
 Target/focus context from the user (may be empty): `$ARGUMENTS`
 
+**Standing rules are already injected.** In projects with `.claude/one-for-all.json` (or
+with `"rules": "global"` in `~/.claude/one-for-all.json`) the plugin hooks inject every
+pinned/`rule:` node for phases all + scope at session start and after compaction, give
+each phase subagent its own phase rules, and surface matching nodes per prompt. This
+command is an optional deeper prime on top of that — orient on a target, not keep rules alive.
+
 The point of this command is to **prime, not dump**: as the graph compounds, loading
 every node would eat the model's context. Instead load a cheap priority manifest now
 and pull full detail on demand.
@@ -26,7 +32,8 @@ Do this:
    ```bash
    python3 "$KBPY" --graph "$G" manifest --top 20
    ```
-   If `$ARGUMENTS` has focus terms (anything other than `--full`), also run a focused
+   Add `--phase <scope|recon|rank|hunt|validate|report>` to either command to see one
+   pipeline phase. If `$ARGUMENTS` has focus terms (anything other than `--full`), also run a focused
    query so the most relevant items lead:
    ```bash
    python3 "$KBPY" --graph "$G" query "<focus terms>" --top 10

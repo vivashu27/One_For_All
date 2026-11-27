@@ -26,6 +26,8 @@ Do this:
    credentials, hostnames, and secrets — store only generalizable knowledge.
 4. For each candidate: **search the graph first**, then either create a new node or
    **reinforce/merge/supersede** the existing one. Never duplicate.
+   Set `phase:` on every new/updated node, and a one-line imperative `rule:` on lessons,
+   workflows and pinned nodes (skill §2).
 5. Link new/updated nodes (`related:` + `[[wikilinks]]`, reciprocal), rebuild
    `INDEX.md` with `python3 "$KBPY" reindex` (plus `--graph <name>` if not default),
    and append a dated entry to `JOURNAL.md`.

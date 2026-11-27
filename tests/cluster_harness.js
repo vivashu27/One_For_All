@@ -106,6 +106,14 @@ const up = (g, x, y) => g.fire("pointerup", { clientX: x, clientY: y, pointerId:
   ck("None → no nodes and no hubs", scene.nodes.length === 0);
   app.setAllTypes(true);
   ck("All → restored", snap() === base);
+  state.graph.nodes[0].phase = ["recon", "hunt"]; state.graph.nodes[4].phase = ["recon"];
+  state.showPhases = true; app.buildGraphDOM();
+  ck("phases overlay adds virtual phase hubs", ["recon", "hunt", "all"].every(p => scene.byId["__hub__phase:" + p]));
+  ck("phase spine links recon → hunt", scene.edges.some(e => e.cls.includes("phase-spine") && e.s === "__hub__phase:recon" && e.t === "__hub__phase:hunt"));
+  ck("each phase of a node gets a spoke", scene.edges.filter(e => e.cls === "edge phase" && e.s === "t1").length === 2);
+  ck("overlay does not move real nodes", real().every(n => !base.includes(n.id + "@") || base.includes(n.id + "@" + at(n.id))));
+  state.showPhases = false; app.buildGraphDOM();
+  ck("overlay off removes phase hubs", !scene.nodes.some(n => n.phaseHub));
   await flush();
   ck("rebuilds and filters don't save again", puts.length === 1);
 

@@ -99,6 +99,8 @@ confidence: medium         # seed | low | medium | high  (how battle-tested)
 reinforced: 0              # times independently confirmed across assessments
 uses: 0                    # times recalled during work — feeds the priority score
 pin: false                 # optional: true forces this node to the top of priority
+phase: [recon, hunt]       # optional: scope | recon | rank | hunt | validate | report | all  (absent = all)
+rule: <1–4 imperative lines>   # optional, one line: what an agent MUST do; injected as a standing rule
 enabled: true              # false retires the node WITHOUT deleting it (see below)
 created: 2026-10-11
 updated: 2026-10-11
@@ -108,6 +110,15 @@ source: assessment         # seed | assessment
 
 `uses` and `pin` are optional (default `0` / unpinned when absent) and feed the
 **priority graph** — see section 8. Do not hand-edit `uses`; `kb.py` maintains it.
+
+`phase` attaches the node to the assessment pipeline (scope → recon → rank → hunt →
+validate → report); `all` means every phase. A node with **`pin: true` or a `rule:`**
+is a *standing rule*: in opted-in projects the hooks inject its `rule:` (or its summary
+when there is no `rule:`) into the coordinator (phases all + scope) and into each phase
+subagent at start, surviving compaction. Write `rule:` as an instruction, not a
+description ("Check every fingerprinted version for CVEs and public PoCs", not "CVE
+lookups are useful"). Every new or updated node MUST set `phase:`; lessons, workflows and
+pinned nodes SHOULD set `rule:`.
 
 `enabled` is optional and defaults to **true** when absent. Setting it to `false`
 (e.g. via the web UI's Disable toggle) keeps the node on disk but marks it retired:

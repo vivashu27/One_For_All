@@ -10,6 +10,8 @@ reinforced: 0
 created: 2026-10-11
 updated: 2026-10-11
 source: seed
+phase: [hunt]
+rule: With 2+ roles/accounts, run Autorize on the low-priv session while browsing as high-priv.
 ---
 
 # Burp Suite + Autorize
