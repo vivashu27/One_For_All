@@ -197,6 +197,8 @@ dialog::backdrop { background: rgba(0,0,0,.55); }
 .gnode text { font-size: 10.5px; }
 .edge.spoke { stroke: #2b3a4d; stroke-width: 1.2; stroke-dasharray: none; }
 .edge.spoke.hl { stroke: var(--accent); }
+.edge.phase { stroke: #9aa5b1; stroke-opacity: 0.35; stroke-dasharray: 1 4; }
+.edge.phase-spine { stroke: #9aa5b1; stroke-width: 2.4; stroke-dasharray: none; }
 
 .canvas { position: relative; flex: 1; min-height: 0; display: flex; }
 .canvas-tools { position: absolute; top: 12px; right: 14px; display: flex; gap: 8px; }

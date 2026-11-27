@@ -10,6 +10,8 @@ reinforced: 0
 created: 2026-10-11
 updated: 2026-10-11
 source: seed
+phase: [all]
+rule: Confirm scope and program rules before sending any request to a target, every time.
 ---
 
 # Verify scope and rules before touching anything

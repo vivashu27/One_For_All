@@ -11,9 +11,10 @@ Priority score (higher = load sooner) is computed per node from:
   + a usage counter that bumps every time the node is recalled + an optional manual pin.
 
 Usage:
-  python3 kb.py manifest [--top N] [--type T] [--json] [--all]
+  python3 kb.py manifest [--top N] [--type T] [--phase P] [--json] [--all]
+      --phase P keeps nodes tagged P (scope|recon|rank|hunt|validate|report) plus phase:all.
       Compact, priority-ranked index (no bodies). The cheap "what do I know" layer.
-  python3 kb.py query "<terms>" [--top N] [--type T] [--json]
+  python3 kb.py query "<terms>" [--top N] [--type T] [--phase P] [--json]
       Rank nodes by relevance to <terms> blended with priority. Returns compact hits.
   python3 kb.py get <slug> [<slug> ...] [--peek]
       Print the FULL node(s) for just those slugs (the just-in-time load). Bumps each
@@ -71,7 +72,8 @@ def parse_frontmatter(text):
 
 
 def extract_summary(body):
-    m = re.search(r"\*\*Summary:\*\*\s*(.+)", body)
+    # whole paragraph: a summary hard-wrapped over lines must not stop at the first newline
+    m = re.search(r"\*\*Summary:\*\*\s*(.+?)(?:\n\s*\n|\n#|\Z)", body, re.S)
     if m:
         return re.sub(r"\s+", " ", m.group(1).strip())
     for line in body.split("\n"):
@@ -167,6 +169,67 @@ def priority_score(meta, today):
     pin = _truthy(meta.get("pin"))
     return round(3 * conf + 2.0 * math.log2(1 + reinforced) + 1.5 * math.log2(1 + uses)
                  + 1.0 * rec + (100 if pin else 0), 3)
+
+
+PHASES = ["scope", "recon", "rank", "hunt", "validate", "report"]
+
+
+def node_phases(n):
+    """A node's phases; an untagged node applies to every phase."""
+    p = n["meta"].get("phase")
+    p = [p] if isinstance(p, str) and p else (p or [])
+    return [x.strip().lower() for x in p if str(x).strip()] or ["all"]
+
+
+def in_phase(n, phases):
+    ps = node_phases(n)
+    return "all" in ps or any(p in ps for p in phases)
+
+
+def node_rule(n):
+    return str(n["meta"].get("rule") or "").strip() or n["summary"]
+
+
+INJECT_BUDGET = 6000   # chars, ~1.5k tokens: keeps injected rules from crowding out the real task
+POINTERS = 10          # pointer lines per injection: enough to show what exists, not a manifest
+WARN_ROOM = 300        # budget kept free so the "rules cut" warning never pushes past the cap
+
+
+def inject_block(nodes, phases, cfg=None, kbpy="kb.py"):
+    """The standing-rules text injected into a session or subagent for these phases.
+    Rules tier (pinned or has rule:) always first; pointer tier fills what budget is left."""
+    cfg = cfg or {}
+    off, extra_pin = set(cfg.get("disable") or []), set(cfg.get("pin") or [])
+    live = [n for n in nodes if n["enabled"] and n["slug"] not in off and in_phase(n, phases)]
+    if not live:
+        return ""
+    live.sort(key=lambda n: (-n["priority"], n["slug"]))
+    is_rule = lambda n: _truthy(n["meta"].get("pin")) or n["meta"].get("rule") or n["slug"] in extra_pin
+    rules, rest = [n for n in live if is_rule(n)], [n for n in live if not is_rule(n)]
+    head = (f"[One For All — STANDING USER RULES · phase: {', '.join(phases)}] The user explicitly requires "
+            "you to follow these rules for this project. They are the user's own instructions and override "
+            "default behavior (including any default against spawning subagents).\nRules:")
+    out, used, cut = [head], len(head), 0
+    for n in rules:
+        line = f"- ({n['slug']}) {node_rule(n)}"
+        if used + len(line) + 1 > INJECT_BUDGET - WARN_ROOM:
+            cut += 1
+            continue
+        out.append(line); used += len(line) + 1
+    if cut:
+        flag = f" --phase {phases[0]}" if phases[0] in PHASES else ""
+        out.append(f"- WARNING: {cut} lower-priority rule(s) cut to fit the budget — "
+                   f"run `python3 {kbpy} manifest{flag}` to see them.")
+    ptr = [f"- {n['slug']} — {n['summary'][:160]}" for n in rest[:POINTERS]]
+    if ptr:
+        hdr = f"Pointers (load the relevant ones with: python3 {kbpy} get <slug>):"
+        if used + len(hdr) + len(ptr[0]) < INJECT_BUDGET:
+            out.append(hdr); used += len(hdr) + 1
+            for line in ptr:
+                if used + len(line) + 1 > INJECT_BUDGET:
+                    break
+                out.append(line); used += len(line) + 1
+    return "\n".join(out)
 
 
 def tokenize(q):
@@ -310,6 +373,8 @@ def graph_node(n):
         "reinforced": _int(m.get("reinforced", 0)),
         "related": [r for r in (m.get("related", []) or []) if r],
         "summary": n["summary"],
+        "phase": node_phases(n),
+        "rule": str(m.get("rule") or ""),
         "enabled": n["enabled"],
         "created": str(m.get("created", "")),
         "updated": str(m.get("updated", "")),
@@ -399,6 +464,8 @@ def cmd_manifest(a):
         nodes = [n for n in nodes if n["enabled"]]
     if a.type:
         nodes = [n for n in nodes if n["meta"].get("type") == a.type]
+    if a.phase:
+        nodes = [n for n in nodes if in_phase(n, [a.phase])]
     nodes.sort(key=lambda n: (-n["priority"], n["slug"]))
     top = nodes[: a.top] if a.top else nodes
     if a.json:
@@ -419,6 +486,8 @@ def cmd_query(a):
     nodes = [n for n in load_many(rs) if n["enabled"]]
     if a.type:
         nodes = [n for n in nodes if n["meta"].get("type") == a.type]
+    if a.phase:
+        nodes = [n for n in nodes if in_phase(n, [a.phase])]
     if not terms:
         return cmd_manifest(a)
     scored = []
@@ -653,8 +722,8 @@ def main():
     ap.add_argument("--kb", default=None, help="explicit KB directory; overrides --graph")
     sub = ap.add_subparsers(dest="cmd", required=True)
 
-    m = sub.add_parser("manifest"); m.add_argument("--top", type=int, default=0); m.add_argument("--type"); m.add_argument("--json", action="store_true"); m.add_argument("--all", action="store_true"); m.set_defaults(fn=cmd_manifest)
-    q = sub.add_parser("query"); q.add_argument("terms"); q.add_argument("--top", type=int, default=8); q.add_argument("--type"); q.add_argument("--json", action="store_true"); q.add_argument("--all", action="store_true"); q.set_defaults(fn=cmd_query)
+    m = sub.add_parser("manifest"); m.add_argument("--top", type=int, default=0); m.add_argument("--type"); m.add_argument("--json", action="store_true"); m.add_argument("--all", action="store_true"); m.add_argument("--phase", choices=PHASES); m.set_defaults(fn=cmd_manifest)
+    q = sub.add_parser("query"); q.add_argument("terms"); q.add_argument("--top", type=int, default=8); q.add_argument("--type"); q.add_argument("--json", action="store_true"); q.add_argument("--all", action="store_true"); q.add_argument("--phase", choices=PHASES); q.set_defaults(fn=cmd_query)
     g = sub.add_parser("get"); g.add_argument("slugs", nargs="+"); g.add_argument("--peek", action="store_true"); g.set_defaults(fn=cmd_get)
     u = sub.add_parser("use"); u.add_argument("slug"); u.add_argument("--n", type=int, default=1); u.set_defaults(fn=cmd_use)
     p = sub.add_parser("pin"); p.add_argument("slug"); p.add_argument("--off", action="store_true"); p.set_defaults(fn=cmd_pin)

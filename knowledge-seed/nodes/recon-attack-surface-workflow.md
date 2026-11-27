@@ -10,6 +10,8 @@ reinforced: 0
 created: 2026-10-11
 updated: 2026-10-11
 source: seed
+phase: [recon, rank]
+rule: Follow scope → enumerate → probe → crawl → rank; recon ends with a ranked list of what to test first.
 ---
 
 # Recon → prioritized attack surface workflow

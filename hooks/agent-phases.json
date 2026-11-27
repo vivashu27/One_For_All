@@ -1,0 +1,10 @@
+{
+  "recon-agent": "recon",
+  "recon-ranker": "rank",
+  "chain-builder": "hunt",
+  "token-auditor": "hunt",
+  "credential-hunter": "hunt",
+  "web3-auditor": "hunt",
+  "validator": "validate",
+  "report-writer": "report"
+}

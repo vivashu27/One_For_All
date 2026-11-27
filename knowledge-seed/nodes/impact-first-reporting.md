@@ -10,6 +10,8 @@ reinforced: 0
 created: 2026-10-11
 updated: 2026-10-11
 source: seed
+phase: [report]
+rule: Lead with concrete business impact and a clean reproducible PoC; no theoretical or hedging language.
 ---
 
 # Impact-first report writing
