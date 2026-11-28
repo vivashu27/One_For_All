@@ -8,7 +8,7 @@ and reused by every future session.
 Think of it as long-term memory that gets *smarter the more you hunt*, instead of
 starting from zero each engagement.
 
-![The One_For_All knowledge graph, with nodes clustered under their category hubs](docs/showcase.png)
+![The One_For_All knowledge graph, with nodes clustered under their category hubs](docs/poster.png)
 
 <sup>The graph view in `/serve-knowledge`: every node sits under its category hub —
 techniques, tools, references, workflows, reporting, lessons, vuln classes. Click a
